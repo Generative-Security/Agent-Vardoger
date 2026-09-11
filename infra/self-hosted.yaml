@@ -1,0 +1,2043 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Agent Vardøger — Self-hosted AI agent session security (Model 1)"
+
+Parameters:
+  ExistingGatewayArn:
+    Type: String
+    Default: ""
+    Description: >
+      ARN of an existing AgentCore Gateway to monitor. Leave empty only when
+      DeployTestHarness=true, which builds a gateway for you. Supplying neither
+      means nothing is monitored.
+  TestHarnessModelId:
+    Type: String
+    Default: "us.amazon.nova-pro-v1:0"
+    Description: >
+      Bedrock model the test harness agent uses. Only read when
+      DeployTestHarness=true. Model access must be enabled in this account and
+      region, or the harness will fail to invoke.
+  DeployTestHarness:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Build a self-contained test gateway: an MCP-protocol gateway with a
+      throwaway echo Lambda target, CUSTOM_JWT inbound auth backed by its own
+      Cognito pool, and the dispatcher already attached as a REQUEST
+      interceptor. Off by default. Intended for evaluating Vardoger, not for
+      production traffic.
+  AgentRuntimeArn:
+    Type: String
+    Default: ""
+    Description: Agent runtime ARN (scope for StopRuntimeSession)
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email address for security alerts (optional)
+  CodeS3Bucket:
+    Type: String
+    Description: S3 bucket containing packaged Lambda code
+  CodeS3Key:
+    Type: String
+    Description: S3 key for Lambda zip
+  SessionTtlMinutes:
+    Type: Number
+    Default: 30
+    Description: Minutes before session expires via DynamoDB TTL
+  DetectionRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Days before detection metadata expires
+  Tier1Mode:
+    Type: String
+    Default: sidecar
+    AllowedValues: [sidecar, gate]
+    Description: >
+      How Tier 1 responds to its own detection. "sidecar" (default) terminates
+      the session and lets the triggering prompt through, so a security
+      component can never refuse the agent's traffic. "gate" additionally
+      refuses the triggering prompt with HTTP 403 — choose it when a single
+      successful malicious prompt is itself unacceptable, e.g. one-shot data
+      exfiltration. Both modes terminate the session.
+  DetectionFailurePolicy:
+    Type: String
+    Default: fail_open
+    AllowedValues: [fail_open, fail_closed]
+    Description: >
+      What happens when detection cannot run at all (engine error, dependency
+      down). "fail_open" (default) passes the prompt and raises the
+      DegradedComponents alarm, so a broken monitor does not break the agent.
+      "fail_closed" refuses the prompt. Does NOT apply to an uninspectable body
+      or a request with no source identity — those are always refused.
+  Tier2MlEndpoint:
+    Type: String
+    Default: ""
+    Description: Optional SageMaker endpoint for Tier 2 ML (leave empty to disable)
+  Tier2KillEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  GlobalKillEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  Tier3Enabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Deploy the Tier 3 cross-session analyzer (a Lambda on a 5-minute
+      schedule). Off by default: it runs continuously whether or not there is
+      anything to find, and it needs a meaningful volume of prompt history
+      before bursts and repeats become distinguishable from ordinary traffic.
+      Turn it on once the deployment is carrying real traffic.
+  Tier3KillEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  Tier3Schedule:
+    Type: String
+    Default: "rate(5 minutes)"
+  CorsAllowOrigins:
+    Type: String
+    Default: "http://localhost:5173,http://localhost:3000"
+
+  # --- Auth (Change 2) ---
+  AuthMode:
+    Type: String
+    Default: "token"
+    AllowedValues: ["none", "token", "cognito", "cognito+identity-center"]
+    Description: >
+      Authentication mode for the control plane.
+      "token" (default, recommended single-operator): the dashboard is served
+      via a Lambda Function URL, but every request must present
+      Authorization: Bearer <AuthSecret>. deploy.sh generates the secret if you
+      do not supply one.
+      "none" (DEV ONLY): open Function URL, caller treated as admin — never use
+      on the public internet.
+      "cognito" / "cognito+identity-center" (team): provision a Cognito user
+      pool + groups fronted by an API Gateway JWT authorizer; assign users to
+      viewer/operator/admin groups. See docs/quickstart.md ("Authentication").
+  AuthSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Shared bearer secret for AuthMode=token. Required when AuthMode=token.
+      Treat as a credential; rotate by updating the stack. Ignored in other modes.
+  CognitoCallbackUrls:
+    Type: String
+    Default: "http://localhost:5173"
+    Description: >
+      Comma-separated OAuth callback/logout URLs for the Cognito Hosted UI code
+      flow (cognito modes only). deploy.sh sets this to the CloudFront dashboard
+      origin plus localhost dev after the distribution domain is known.
+  DispatcherReservedConcurrency:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: >
+      Reserved concurrency for the inline dispatcher (interceptor). Default 0 =
+      NO reservation (uses the shared account pool) — this is the safe default
+      because reserving concurrency requires the account to keep >=100
+      unreserved, which brand-new accounts (limit as low as 10-50) do not have,
+      so a non-zero value can fail stack creation. For a high-traffic agent in
+      an established account, set this to a ceiling (e.g. 200) to guarantee
+      capacity; the DispatcherThrottleAlarm fires either way if throttling
+      occurs.
+
+  # --- Tagging / cost allocation (Change 3) ---
+  DeploymentModel:
+    Type: String
+    Default: "self-hosted"
+    AllowedValues: ["self-hosted", "managed-agent"]
+    Description: Deployment model tag applied to all taggable resources.
+  ScopeId:
+    Type: String
+    Default: "local"
+    Description: Isolation scope tag value (self-hosted is always "local").
+  CostAllocationTagKey:
+    Type: String
+    Default: ""
+    Description: Optional customer-defined cost-allocation tag key.
+  CostAllocationTagValue:
+    Type: String
+    Default: ""
+    Description: Optional customer-defined cost-allocation tag value.
+
+  # --- Premium signatures cross-account S3 wiring (Change 4) ---
+  PremiumSignatureBucket:
+    Type: String
+    Default: ""
+    Description: Cross-account S3 bucket hosting premium signature feeds (optional).
+  PremiumSignaturePrefix:
+    Type: String
+    Default: "premium/"
+    Description: S3 prefix for premium signature objects.
+  PremiumSignatureRoleArn:
+    Type: String
+    Default: ""
+    Description: Optional cross-account role ARN to assume for premium signature access.
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasExistingGateway: !Not [!Equals [!Ref ExistingGatewayArn, ""]]
+  HasAgentRuntimeArn: !Not [!Equals [!Ref AgentRuntimeArn, ""]]
+  DeployTestHarness: !Equals [!Ref DeployTestHarness, "true"]
+  # NOTE: EnableTier2 means "an ML endpoint is configured" — NOT "Tier 2 is
+  # deployed". Tier2Function is deployed unconditionally because it is the only
+  # writer of PromptHistory, which Prompt History and Tier 3 both read. This
+  # condition now gates only the SageMaker IAM grant.
+  EnableTier2: !Not [!Equals [!Ref Tier2MlEndpoint, ""]]
+  EnableTier3: !Equals [!Ref Tier3Enabled, "true"]
+  # Change 2: Cognito/API Gateway auth. Cognito resources exist only for the
+  # cognito modes; the Function URL exists for none/token (token adds a
+  # bearer-secret gate in the app layer).
+  EnableCognito: !Or [!Equals [!Ref AuthMode, "cognito"], !Equals [!Ref AuthMode, "cognito+identity-center"]]
+  UsesFunctionUrl: !Or [!Equals [!Ref AuthMode, "none"], !Equals [!Ref AuthMode, "token"]]
+  HasDispatcherReservedConcurrency: !Not [!Equals [!Ref DispatcherReservedConcurrency, 0]]
+  # Change 3: customer cost-allocation tag
+  HasCostTag: !Not [!Equals [!Ref CostAllocationTagKey, ""]]
+  # Change 4: premium signatures cross-account wiring
+  HasPremiumBucket: !Not [!Equals [!Ref PremiumSignatureBucket, ""]]
+  HasPremiumRole: !Not [!Equals [!Ref PremiumSignatureRoleArn, ""]]
+
+Resources:
+  # --- KMS ---
+  PromptGuardKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Agent Vardøger prompt encryption key
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          # Allow CloudWatch and SNS to use the key so CMK-encrypted SNS
+          # publishes (including CloudWatch alarm actions) can produce/consume
+          # data keys. Scoped to this account via the service principals.
+          - Sid: AllowCloudWatchAndSns
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudwatch.amazonaws.com
+                - sns.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+            Resource: "*"
+            # Confused-deputy guard: only this account's CloudWatch/SNS may use
+            # the key via these service principals.
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- SNS ---
+  SecurityAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: vardoger-security-alerts
+      KmsMasterKeyId: !Ref PromptGuardKmsKey
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref SecurityAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # Allow CloudWatch alarms to publish to the alert topic.
+  SecurityAlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SecurityAlertTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SecurityAlertTopic
+            Condition:
+              StringEquals:
+                "AWS:SourceAccount": !Ref "AWS::AccountId"
+
+  # --- SQS ---
+  AlertDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: vardoger-alert-dlq
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  AlertQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: vardoger-alert-queue
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AlertDlq.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  PromptIntakeQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: vardoger-prompt-intake
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- DynamoDB ---
+  SessionRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerSessionRegistry
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  DetectionEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerDetectionEvents
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  PromptHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerPromptHistory
+      BillingMode: PAY_PER_REQUEST
+      # Prompt text lives here — encrypt with the CMK and enable PITR.
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref PromptGuardKmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      # Change 1: single scope/source model. Partition key is scope_id
+      # (self-hosted value is always "local"). `source` (="<account>/<agent>")
+      # is a non-key segmentation attribute stored on items, no schema change.
+      AttributeDefinitions:
+        - AttributeName: scope_id
+          AttributeType: S
+        - AttributeName: session_timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scope_id
+          KeyType: HASH
+        - AttributeName: session_timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  SessionRiskTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerSessionRisk
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref PromptGuardKmsKey
+      # Change 1: HASH key attribute NAME is intentionally kept as
+      # `tenant_session_id`. The tier2 handler writes the SessionRisk value
+      # f"{scope_id}#{session_id}" into this attribute — the value is now
+      # scope_id#session_id (not tenant#session). Do NOT rename the attribute.
+      AttributeDefinitions:
+        - AttributeName: tenant_session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenant_session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  OutcomeLedgerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerOutcomeLedger
+      BillingMode: PAY_PER_REQUEST
+      # Change 1: pk now holds scope_id (self-hosted value "local"). No key
+      # schema change required; only the semantic meaning of pk changed.
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1_pk
+          AttributeType: S
+        - AttributeName: gsi1_sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1_Run
+          KeySchema:
+            - AttributeName: gsi1_pk
+              KeyType: HASH
+            - AttributeName: gsi1_sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # Per-scope configuration store: Tier 2/Tier 3 security policy, custom
+  # signatures, and managed-upgrade intent. Partition key is scope_id
+  # (self-hosted is always "local"). The control plane reads AND writes this
+  # table; the Tier 2/Tier 3 handlers read policy from it. The env var is
+  # VARDOGER_TENANTS_TABLE (name kept for handler compatibility).
+  ScopeConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerTenants
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: scope_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scope_id
+          KeyType: HASH
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- S3: Evidence ---
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "vardoger-evidence-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "aws:kms"
+              KMSMasterKeyID: !Ref PromptGuardKmsKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- IAM: Dispatcher ---
+  DispatcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vardoger-dispatcher-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VardogerDispatcher
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt SessionRegistryTable.Arn
+                  - !GetAtt DetectionEventsTable.Arn
+              # Read-only on the scope-config table so the inline scanner can
+              # load operator-authored custom signatures (append-only). Without
+              # this the load silently fails and custom signatures never fire.
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - !GetAtt ScopeConfigTable.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource:
+                  - !GetAtt AlertQueue.Arn
+                  - !GetAtt PromptIntakeQueue.Arn
+              - Effect: Allow
+                Action: bedrock-agentcore:StopRuntimeSession
+                Resource: !If
+                  - HasAgentRuntimeArn
+                  - - !Ref AgentRuntimeArn
+                    - !Sub "${AgentRuntimeArn}/*"
+                  # Narrowed to the exact ARN by deploy.sh's second pass.
+                  - - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*"
+              # Encrypt blocked-prompt evidence with the CMK and store it in the
+              # evidence bucket. Without these, encrypt_and_log silently no-ops.
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt PromptGuardKmsKey.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${EvidenceBucket.Arn}/*"
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- IAM: Dispatcher premium signature policy (Change 4) ---
+  DispatcherPremiumPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasPremiumBucket
+    Properties:
+      PolicyName: VardogerDispatcherPremium
+      Roles:
+        - !Ref DispatcherRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${PremiumSignatureBucket}/*"
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub "arn:aws:s3:::${PremiumSignatureBucket}"
+          - !If
+            - HasPremiumRole
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Resource: !Ref PremiumSignatureRoleArn
+            - !Ref "AWS::NoValue"
+
+  # --- Lambda: Dispatcher ---
+  DispatcherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vardoger-dispatcher
+      Runtime: python3.14
+      Handler: adapters.agentcore.dispatcher.lambda_handler
+      Role: !GetAtt DispatcherRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      # The dispatcher is inline on every request. This reservation is the
+      # concurrent-prompt ceiling (parameterized). 0 => no reservation.
+      ReservedConcurrentExecutions: !If
+        - HasDispatcherReservedConcurrency
+        - !Ref DispatcherReservedConcurrency
+        - !Ref "AWS::NoValue"
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_SESSION_TABLE: !Ref SessionRegistryTable
+          VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
+          # The DetectionRetentionDays parameter previously reached no function,
+          # so every writer silently used its own hardcoded 90-day default and
+          # changing the parameter did nothing. Each writer of a TTL'd detection
+          # row now receives it.
+          VARDOGER_DETECTION_RETENTION_DAYS: !Ref DetectionRetentionDays
+          VARDOGER_TIER1_MODE: !Ref Tier1Mode
+          VARDOGER_DETECTION_FAILURE_POLICY: !Ref DetectionFailurePolicy
+          # Scope-config table: the inline scanner reads custom signatures here.
+          VARDOGER_TENANTS_TABLE: !Ref ScopeConfigTable
+          # Enable loading operator-authored custom signatures into the inline
+          # scanner (append-only, bounded-timeout read).
+          VARDOGER_LOAD_CUSTOM_SIGNATURES: "true"
+          VARDOGER_ALERT_QUEUE_URL: !Ref AlertQueue
+          VARDOGER_AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+          VARDOGER_TELEMETRY_MODE: local
+          # Local-mode telemetry: feed the same-account intake queue that fronts
+          # Tier 2 (and, downstream, PromptHistory / Tier 3). Previously this
+          # queue was passed as MANAGED_INTAKE_URL, which local mode ignored, so
+          # Tier 2/3 and Prompt History never received any data.
+          VARDOGER_PROMPT_INTAKE_QUEUE_URL: !Ref PromptIntakeQueue
+          VARDOGER_KMS_KEY_ID: !Ref PromptGuardKmsKey
+          VARDOGER_EVIDENCE_S3_BUCKET: !Ref EvidenceBucket
+          VARDOGER_SESSION_TTL_MINUTES: !Ref SessionTtlMinutes
+          VARDOGER_GLOBAL_KILL_ENABLED: !Ref GlobalKillEnabled
+          VARDOGER_PREMIUM_SIGNATURE_BUCKET: !If [HasPremiumBucket, !Ref PremiumSignatureBucket, ""]
+          VARDOGER_PREMIUM_SIGNATURE_PREFIX: !Ref PremiumSignaturePrefix
+          VARDOGER_PREMIUM_SIGNATURE_ROLE_ARN: !If [HasPremiumRole, !Ref PremiumSignatureRoleArn, ""]
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # Explicit log group with bounded retention (default is never-expire).
+  DispatcherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/vardoger-dispatcher
+      RetentionInDays: 90
+
+  # Turn the dispatcher's "Telemetry copy failed" warning into a metric so a
+  # silently-degraded telemetry path (Tier 2 not being fed) raises an alarm
+  # instead of failing quietly.
+  TransportDegradedMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DispatcherLogGroup
+      FilterPattern: '"Telemetry copy failed"'
+      MetricTransformations:
+        - MetricNamespace: AgentVardoger
+          MetricName: TelemetryTransportFailures
+          MetricValue: "1"
+          DefaultValue: 0
+
+  TransportDegradedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: vardoger-telemetry-degraded
+      AlarmDescription: Dispatcher failed to forward prompt telemetry (Tier 2 may be starved).
+      Namespace: AgentVardoger
+      MetricName: TelemetryTransportFailures
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SecurityAlertTopic
+
+  # The DegradedComponents metric (emitted as EMF by vardoger/health.py) is the
+  # single signal for "a security function stopped working but nothing raised".
+  # It is REQUIRED for DetectionFailurePolicy=fail_open to be a responsible
+  # default: when detection cannot run, the prompt is passed through and this
+  # alarm is the only record that traffic went uninspected. Without it,
+  # fail-open would be indistinguishable from working correctly.
+  DegradedComponentsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: vardoger-degraded-components
+      AlarmDescription: >
+        A security function degraded — inline detection could not run, a
+        signature refresh failed, evidence could not be written, or a query
+        path fell back to empty results. Check the "component" dimension.
+      Namespace: AgentVardoger
+      MetricName: DegradedComponents
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SecurityAlertTopic
+
+  # Throttling on the inline dispatcher means legitimate prompts are being
+  # refused — raise DispatcherReservedConcurrency if this fires.
+  DispatcherThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: vardoger-dispatcher-throttles
+      AlarmDescription: Inline dispatcher is being throttled; legitimate traffic may be blocked.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DispatcherFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SecurityAlertTopic
+
+  # Lets the operator's OWN gateway invoke the dispatcher. Conditional now,
+  # because with DeployTestHarness=true there may be no external gateway at all
+  # and an empty SourceArn is not a valid ARN.
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasExistingGateway
+    Properties:
+      FunctionName: !Ref DispatcherFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Ref ExistingGatewayArn
+
+  # --- Lambda: Alert ---
+  AlertRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vardoger-alert-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+      Policies:
+        - PolicyName: VardogerAlert
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SecurityAlertTopic
+              # The SNS topic is CMK-encrypted, so publishing requires KMS
+              # grants; without these, publish fails with KMSAccessDenied and
+              # the alert email never arrives.
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt PromptGuardKmsKey.Arn
+              - Effect: Allow
+                Action: bedrock-agentcore:StopRuntimeSession
+                Resource: !If
+                  - HasAgentRuntimeArn
+                  - - !Ref AgentRuntimeArn
+                    - !Sub "${AgentRuntimeArn}/*"
+                  # Narrowed to the exact ARN by deploy.sh's second pass.
+                  - - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*"
+              - Effect: Allow
+                Action: securityhub:BatchImportFindings
+                Resource: "*"
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  AlertFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vardoger-alert
+      Runtime: python3.14
+      Handler: adapters.agentcore.alerting.lambda_handler
+      Role: !GetAtt AlertRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_SNS_TOPIC_ARN: !Ref SecurityAlertTopic
+          VARDOGER_AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  AlertEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt AlertQueue.Arn
+      FunctionName: !Ref AlertFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 5
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+
+  # --- Lambda: Enforcement (async Tier 2/3 kills) ---
+  # Dedicated enforcement entry point. Tier 2/3 invoke THIS function to
+  # terminate a session; it validates the request and calls StopRuntimeSession.
+  # Previously the tiers invoked the gateway dispatcher, which could not parse
+  # the enforcement payload and never issued a kill.
+  EnforcementRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vardoger-enforcement-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VardogerEnforcement
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt SessionRegistryTable.Arn
+                  - !GetAtt DetectionEventsTable.Arn
+              - Effect: Allow
+                Action: bedrock-agentcore:StopRuntimeSession
+                Resource: !If
+                  - HasAgentRuntimeArn
+                  - - !Ref AgentRuntimeArn
+                    - !Sub "${AgentRuntimeArn}/*"
+                  # Narrowed to the exact ARN by deploy.sh's second pass.
+                  - - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*"
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  EnforcementFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vardoger-enforcement
+      Runtime: python3.14
+      Handler: adapters.agentcore.enforcement_handler.lambda_handler
+      Role: !GetAtt EnforcementRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_SESSION_TABLE: !Ref SessionRegistryTable
+          VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
+          VARDOGER_AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+          VARDOGER_SESSION_TTL_MINUTES: !Ref SessionTtlMinutes
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- Lambda: Tier 2 (always deployed; ML classification optional) ---
+  Tier2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vardoger-tier2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+      Policies:
+        - PolicyName: VardogerTier2
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt PromptHistoryTable.Arn
+                  - !GetAtt SessionRiskTable.Arn
+                  - !GetAtt DetectionEventsTable.Arn
+                  - !GetAtt OutcomeLedgerTable.Arn
+                  - !Sub "${OutcomeLedgerTable.Arn}/index/*"
+                  - !GetAtt ScopeConfigTable.Arn
+              # Granted only when an ML endpoint is configured. With
+              # Tier2MlEndpoint empty this would render "endpoint/" — an invalid
+              # ARN that fails stack creation — and the function has no reason to
+              # hold SageMaker permission it will never exercise.
+              - !If
+                - EnableTier2
+                - Effect: Allow
+                  Action: sagemaker:InvokeEndpoint
+                  Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${Tier2MlEndpoint}"
+                - !Ref "AWS::NoValue"
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt EnforcementFunction.Arn
+              # PromptHistory / SessionRisk are CMK-encrypted; reading/writing
+              # them requires KMS grants.
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt PromptGuardKmsKey.Arn
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- IAM: Tier2 premium signature policy (Change 4) ---
+  Tier2PremiumPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasPremiumBucket
+    Properties:
+      PolicyName: VardogerTier2Premium
+      Roles:
+        - !Ref Tier2Role
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${PremiumSignatureBucket}/*"
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub "arn:aws:s3:::${PremiumSignatureBucket}"
+          - !If
+            - HasPremiumRole
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Resource: !Ref PremiumSignatureRoleArn
+            - !Ref "AWS::NoValue"
+
+  # Deployed in every configuration. Tier2Function is the ONLY writer of
+  # PromptHistory, so gating it on an ML endpoint left PromptIntakeQueue with no
+  # consumer: every prompt the dispatcher published expired unread after 14 days
+  # and both the Prompt History and Tier 3 panels stayed permanently empty. With
+  # no endpoint configured the handler records the prompt and skips inference.
+  Tier2Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vardoger-tier2-ml
+      Runtime: python3.14
+      Handler: vardoger.tier2.handler.lambda_handler
+      Role: !GetAtt Tier2Role.Arn
+      MemorySize: 512
+      Timeout: 60
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_ML_ENDPOINT: !Ref Tier2MlEndpoint
+          VARDOGER_PROMPT_HISTORY_TABLE: !Ref PromptHistoryTable
+          VARDOGER_SESSION_RISK_TABLE: !Ref SessionRiskTable
+          VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
+          VARDOGER_DETECTION_EVENT_RETENTION_DAYS: !Ref DetectionRetentionDays
+          VARDOGER_OUTCOME_TABLE: !Ref OutcomeLedgerTable
+          VARDOGER_TENANTS_TABLE: !Ref ScopeConfigTable
+          VARDOGER_ML_KILL_ENABLED: !Ref Tier2KillEnabled
+          VARDOGER_GLOBAL_KILL_ENABLED: !Ref GlobalKillEnabled
+          VARDOGER_ENFORCEMENT_FUNCTION: !Ref EnforcementFunction
+          VARDOGER_PREMIUM_SIGNATURE_BUCKET: !If [HasPremiumBucket, !Ref PremiumSignatureBucket, ""]
+          VARDOGER_PREMIUM_SIGNATURE_PREFIX: !Ref PremiumSignaturePrefix
+          VARDOGER_PREMIUM_SIGNATURE_ROLE_ARN: !If [HasPremiumRole, !Ref PremiumSignatureRoleArn, ""]
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  Tier2EventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt PromptIntakeQueue.Arn
+      FunctionName: !Ref Tier2Function
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+
+  # --- Lambda: Tier 3 Analysis (optional) ---
+  Tier3Role:
+    Type: AWS::IAM::Role
+    Condition: EnableTier3
+    Properties:
+      RoleName: vardoger-tier3-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VardogerTier3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt PromptHistoryTable.Arn
+                  - !GetAtt SessionRiskTable.Arn
+                  - !GetAtt DetectionEventsTable.Arn
+                  - !GetAtt OutcomeLedgerTable.Arn
+                  - !Sub "${OutcomeLedgerTable.Arn}/index/*"
+                  - !GetAtt ScopeConfigTable.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt EnforcementFunction.Arn
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt PromptGuardKmsKey.Arn
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  Tier3Function:
+    Type: AWS::Lambda::Function
+    Condition: EnableTier3
+    Properties:
+      FunctionName: vardoger-tier3-analysis
+      Runtime: python3.14
+      Handler: vardoger.tier3.handler.lambda_handler
+      Role: !GetAtt Tier3Role.Arn
+      MemorySize: 512
+      Timeout: 120
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_PROMPT_HISTORY_TABLE: !Ref PromptHistoryTable
+          VARDOGER_SESSION_RISK_TABLE: !Ref SessionRiskTable
+          VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
+          VARDOGER_DETECTION_EVENT_RETENTION_DAYS: !Ref DetectionRetentionDays
+          VARDOGER_OUTCOME_TABLE: !Ref OutcomeLedgerTable
+          VARDOGER_TENANTS_TABLE: !Ref ScopeConfigTable
+          TIER3_ENABLED: !Ref Tier3Enabled
+          TIER3_KILL_ENABLED: !Ref Tier3KillEnabled
+          VARDOGER_GLOBAL_KILL_ENABLED: !Ref GlobalKillEnabled
+          VARDOGER_ENFORCEMENT_FUNCTION: !Ref EnforcementFunction
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # Named *Rule to stay distinct from the Tier3Schedule PARAMETER below it.
+  # CloudFormation keeps parameters and resources in one logical-ID namespace,
+  # so sharing the name both fails validation and makes ScheduleExpression a
+  # self-reference.
+  Tier3ScheduleRule:
+    Type: AWS::Events::Rule
+    Condition: EnableTier3
+    Properties:
+      Name: vardoger-tier3-schedule
+      ScheduleExpression: !Ref Tier3Schedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt Tier3Function.Arn
+          Id: Tier3Target
+          Input: '{"source":"vardoger.tier3","action":"tier3_analysis"}'
+
+  Tier3Permission:
+    Type: AWS::Lambda::Permission
+    Condition: EnableTier3
+    Properties:
+      FunctionName: !Ref Tier3Function
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt Tier3ScheduleRule.Arn
+
+  # --- Lambda: Control Plane API ---
+  ControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vardoger-control-plane-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VardogerControlPlane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt SessionRegistryTable.Arn
+                  - !GetAtt DetectionEventsTable.Arn
+                  - !GetAtt PromptHistoryTable.Arn
+                  - !GetAtt SessionRiskTable.Arn
+                  - !GetAtt OutcomeLedgerTable.Arn
+                  - !Sub "${OutcomeLedgerTable.Arn}/index/*"
+              # The scope-config table backs the admin write paths: security
+              # policy, custom signatures, and managed-upgrade intent.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt ScopeConfigTable.Arn
+              # Reading the CMK-encrypted PromptHistory / SessionRisk tables.
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt PromptGuardKmsKey.Arn
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  ControlPlaneFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vardoger-control-plane
+      Runtime: python3.14
+      Handler: control_plane.lambda_handler.handler
+      Role: !GetAtt ControlPlaneRole.Arn
+      MemorySize: 512
+      Timeout: 28
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_SESSION_TABLE: !Ref SessionRegistryTable
+          VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
+          VARDOGER_PROMPT_HISTORY_TABLE: !Ref PromptHistoryTable
+          VARDOGER_SESSION_RISK_TABLE: !Ref SessionRiskTable
+          VARDOGER_OUTCOME_TABLE: !Ref OutcomeLedgerTable
+          VARDOGER_TENANTS_TABLE: !Ref ScopeConfigTable
+          VARDOGER_CORS_ORIGINS: !Ref CorsAllowOrigins
+          VARDOGER_AUTH_MODE: !Ref AuthMode
+          VARDOGER_AUTH_SECRET: !Ref AuthSecret
+          VARDOGER_DEPLOYMENT_MODE: self-hosted
+          VARDOGER_COGNITO_USER_POOL_ID: !If [EnableCognito, !Ref ControlPlaneUserPool, ""]
+          VARDOGER_COGNITO_APP_CLIENT_ID: !If [EnableCognito, !Ref ControlPlaneUserPoolClient, ""]
+          VARDOGER_COGNITO_REGION: !If [EnableCognito, !Ref "AWS::Region", ""]
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  # --- Cognito auth (Change 2) — gated on EnableCognito ---
+  ControlPlaneUserPool:
+    Type: AWS::Cognito::UserPool
+    Condition: EnableCognito
+    Properties:
+      UserPoolName: vardoger-control-plane
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      UserPoolTags:
+        Application: AgentVardoger
+        ManagedBy: agent-vardoger
+        Scope: !Ref ScopeId
+        DeploymentModel: !Ref DeploymentModel
+
+  # Hosted UI domain for the OAuth code flow. Uses a Cognito-provided domain
+  # prefix (unique per account/region). Without a domain there is no Hosted UI
+  # and the code flow cannot complete.
+  ControlPlaneUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Condition: EnableCognito
+    Properties:
+      Domain: !Sub "vardoger-${AWS::AccountId}-${AWS::Region}"
+      UserPoolId: !Ref ControlPlaneUserPool
+
+  ControlPlaneUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: EnableCognito
+    Properties:
+      ClientName: vardoger-control-plane-client
+      UserPoolId: !Ref ControlPlaneUserPool
+      GenerateSecret: false
+      # CallbackURLs are REQUIRED for the code flow; without them CloudFormation
+      # rejects the client. They are supplied via CognitoCallbackUrls (set by
+      # deploy.sh to the CloudFront dashboard origin + localhost dev) after the
+      # distribution domain is known.
+      CallbackURLs: !Split [",", !Ref CognitoCallbackUrls]
+      LogoutURLs: !Split [",", !Ref CognitoCallbackUrls]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # RBAC groups mapped to the cognito:groups claim read by the app.
+  ControlPlaneViewerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Condition: EnableCognito
+    Properties:
+      GroupName: viewer
+      UserPoolId: !Ref ControlPlaneUserPool
+      Description: Read-only access to the control plane.
+
+  ControlPlaneOperatorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Condition: EnableCognito
+    Properties:
+      GroupName: operator
+      UserPoolId: !Ref ControlPlaneUserPool
+      Description: Operational actions on the control plane.
+
+  ControlPlaneAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Condition: EnableCognito
+    Properties:
+      GroupName: admin
+      UserPoolId: !Ref ControlPlaneUserPool
+      Description: Full administrative access to the control plane.
+
+  # --- API Gateway (HTTP API) with JWT authorizer (Change 2) ---
+  ControlPlaneHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Condition: EnableCognito
+    Properties:
+      Name: vardoger-control-plane-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: !Split [",", !Ref CorsAllowOrigins]
+        AllowMethods: ["*"]
+        AllowHeaders: ["*"]
+
+  ControlPlaneJwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Condition: EnableCognito
+    Properties:
+      ApiId: !Ref ControlPlaneHttpApi
+      AuthorizerType: JWT
+      Name: vardoger-cognito-jwt
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Audience:
+          - !Ref ControlPlaneUserPoolClient
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${ControlPlaneUserPool}"
+
+  ControlPlaneApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: EnableCognito
+    Properties:
+      ApiId: !Ref ControlPlaneHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ControlPlaneFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  ControlPlaneDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: EnableCognito
+    Properties:
+      ApiId: !Ref ControlPlaneHttpApi
+      RouteKey: "$default"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref ControlPlaneJwtAuthorizer
+      Target: !Sub "integrations/${ControlPlaneApiIntegration}"
+
+  ControlPlaneApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: EnableCognito
+    Properties:
+      ApiId: !Ref ControlPlaneHttpApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  ControlPlaneApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: EnableCognito
+    Properties:
+      FunctionName: !Ref ControlPlaneFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ControlPlaneHttpApi}/*/*"
+
+  # --- Lambda Function URL (Change 2) ---
+  # Exists for AuthMode none (DEV ONLY, open) and token (bearer-secret gated in
+  # the app layer). The URL's own AuthType is NONE in both cases; in token mode
+  # the control plane enforces Authorization: Bearer <AuthSecret> on every
+  # request. Cognito modes use the API Gateway JWT authorizer instead.
+  ControlPlaneUrl:
+    Type: AWS::Lambda::Url
+    Condition: UsesFunctionUrl
+    Properties:
+      TargetFunctionArn: !Ref ControlPlaneFunction
+      AuthType: NONE
+      Cors:
+        AllowOrigins: !Split [",", !Ref CorsAllowOrigins]
+        AllowMethods: ["*"]
+        AllowHeaders: ["*"]
+        # The dashboard sends credentialed requests (it attaches the bearer
+        # token), so the browser requires access-control-allow-credentials:true
+        # on the response. Without this the preflight passes but the actual
+        # credentialed call is rejected even with a single, correct origin.
+        AllowCredentials: true
+
+  # A public NONE-auth Function URL needs BOTH grants on the resource policy:
+  #   1. InvokeFunctionUrl WITH the FunctionUrlAuthType=NONE condition — admits
+  #      the request at the URL-auth layer.
+  #   2. InvokeFunction WITHOUT that condition — allows the underlying invoke.
+  # With only #1, the URL layer admits an anonymous request but the invoke is
+  # denied, so even a header-less call gets the Lambda-service 403. Note the
+  # FunctionUrlAuthType property is ONLY valid on the InvokeFunctionUrl action
+  # (AWS rejects it on InvokeFunction), which is why #2 omits it.
+  ControlPlaneUrlPermission:
+    Type: AWS::Lambda::Permission
+    Condition: UsesFunctionUrl
+    Properties:
+      FunctionName: !Ref ControlPlaneFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  ControlPlaneUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: UsesFunctionUrl
+    Properties:
+      FunctionName: !Ref ControlPlaneFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+
+  # ===========================================================================
+  # Optional test harness (DeployTestHarness=true)
+  # ===========================================================================
+  # A complete, self-contained gateway so Vardoger can be evaluated without
+  # first standing up AgentCore by hand. See docs/test-harness.md.
+  #
+  # The target is a Lambda, NOT an AgentCore Runtime. That is a hard AWS
+  # constraint, not a preference: a Runtime target cannot be attached to an
+  # MCP-protocol gateway, and the combination produces a gateway that accepts
+  # connections, advertises zero tools, and silently never invokes anything.
+  # ---------------------------------------------------------------------------
+
+  # --- Cognito: inbound auth for the test gateway ---
+  # CUSTOM_JWT rather than AWS_IAM so the dashboard's Test Console can reach it.
+  # The console presents a bearer token and cannot sign SigV4, so an IAM gateway
+  # is unreachable from the browser no matter how it is configured.
+  TestHarnessUserPool:
+    Type: AWS::Cognito::UserPool
+    Condition: DeployTestHarness
+    Properties:
+      UserPoolName: !Sub "vardoger-test-harness-${AWS::StackName}"
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+  TestHarnessUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Condition: DeployTestHarness
+    Properties:
+      Domain: !Sub "vardoger-th-${AWS::AccountId}-${AWS::Region}"
+      UserPoolId: !Ref TestHarnessUserPool
+
+  # A resource server is what makes client_credentials possible: the grant needs
+  # a scope to request, and a scope must belong to a resource server.
+  TestHarnessResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Condition: DeployTestHarness
+    Properties:
+      UserPoolId: !Ref TestHarnessUserPool
+      Identifier: vardoger-gateway
+      Name: vardoger-gateway
+      Scopes:
+        - ScopeName: invoke
+          ScopeDescription: Invoke the Vardoger test gateway
+
+  # Machine-to-machine client. No user login: the Test Console exchanges the
+  # client id and secret for an access token.
+  TestHarnessUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: DeployTestHarness
+    DependsOn: TestHarnessResourceServer
+    Properties:
+      UserPoolId: !Ref TestHarnessUserPool
+      ClientName: vardoger-test-harness-client
+      GenerateSecret: true
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - vardoger-gateway/invoke
+      SupportedIdentityProviders:
+        - COGNITO
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # --- The echo target ---
+  TestHarnessEchoRole:
+    Type: AWS::IAM::Role
+    Condition: DeployTestHarness
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Deliberately trivial. Vardoger inspects the REQUEST, and the interceptor
+  # runs before the target is invoked at all, so what this returns is
+  # irrelevant to detection. It exists only so the gateway has a real tool to
+  # advertise — an empty tools/list means no client can call anything, which is
+  # indistinguishable from "the monitor is broken".
+  TestHarnessEchoFunction:
+    Type: AWS::Lambda::Function
+    Condition: DeployTestHarness
+    Properties:
+      FunctionName: !Sub "vardoger-test-echo-${AWS::StackName}"
+      Runtime: python3.14
+      Handler: index.lambda_handler
+      Role: !GetAtt TestHarnessEchoRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+
+          def lambda_handler(event, context):
+              """Echo the tool arguments back. Test target only."""
+              return {"result": "echo: " + json.dumps(event)[:500]}
+
+  # --- Gateway service role ---
+  # Trust is scoped by aws:SourceAccount, NOT aws:SourceArn. Pinning the gateway
+  # ARN would be tighter, but the gateway needs this role at creation time and
+  # the role would need the gateway's ARN — a cycle. The console's default role
+  # does pin SourceArn, which is why reusing one across gateways fails with
+  # "The gateway execution role could not be assumed".
+  TestHarnessGatewayRole:
+    Type: AWS::IAM::Role
+    Condition: DeployTestHarness
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+      Policies:
+        - PolicyName: InvokeTestTarget
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Scoped to the one echo function. The default gateway role AWS
+              # creates carries BedrockAgentCoreFullAccess, which can invoke
+              # every Lambda in the account; this one cannot.
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt TestHarnessEchoFunction.Arn
+
+  # --- The gateway ---
+  TestHarnessGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Condition: DeployTestHarness
+    Properties:
+      Name: !Sub "vardoger-test-${AWS::AccountId}"
+      RoleArn: !GetAtt TestHarnessGatewayRole.Arn
+      ProtocolType: MCP
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${TestHarnessUserPool}/.well-known/openid-configuration"
+          AllowedClients:
+            - !Ref TestHarnessUserPoolClient
+      # This is step 3 of the quickstart, done for you.
+      InterceptorConfigurations:
+        - Interceptor:
+            Lambda:
+              Arn: !GetAtt DispatcherFunction.Arn
+          InterceptionPoints:
+            - REQUEST
+          InputConfiguration:
+            # True so the interceptor receives request headers. Without it the
+            # parser never sees mcp-session-id and falls back to a session id
+            # taken from the request body, which is caller-forgeable.
+            PassRequestHeaders: true
+
+  TestHarnessTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Condition: DeployTestHarness
+    Properties:
+      GatewayIdentifier: !Ref TestHarnessGateway
+      Name: vardoger-echo
+      Description: Throwaway echo tool so the gateway advertises something callable.
+      CredentialProviderConfigurations:
+        # The gateway signs to Lambda with its own service role.
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt TestHarnessEchoFunction.Arn
+            ToolSchema:
+              InlinePayload:
+                - Name: echo
+                  Description: Echo a prompt back. Used to exercise Vardoger detection.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      prompt:
+                        Type: string
+                        Description: The text to inspect and echo.
+                    Required:
+                      - prompt
+
+  # The gateway must be allowed to invoke the dispatcher, exactly as an
+  # operator's own gateway is by LambdaInvokePermission above.
+  TestHarnessDispatcherPermission:
+    Type: AWS::Lambda::Permission
+    Condition: DeployTestHarness
+    Properties:
+      FunctionName: !Ref DispatcherFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !GetAtt TestHarnessGateway.GatewayArn
+
+  # --- Credential provider: how the Harness authenticates to the Gateway ---
+  # The harness defaults to SigV4 for this hop. Our gateway is CUSTOM_JWT so the
+  # Test Console can reach it, which means the harness needs an OAuth client
+  # instead. Both sides therefore point at the same Cognito app client.
+  TestHarnessOAuthProvider:
+    Type: AWS::BedrockAgentCore::OAuth2CredentialProvider
+    Condition: DeployTestHarness
+    Properties:
+      Name: !Sub "vardoger-test-${AWS::StackName}"
+      CredentialProviderVendor: CustomOauth2
+      Oauth2ProviderConfigInput:
+        CustomOauth2ProviderConfig:
+          ClientId: !Ref TestHarnessUserPoolClient
+          # Readable here but deliberately NOT surfaced as a stack output:
+          # outputs are visible to anyone who can describe the stack.
+          ClientSecret: !GetAtt TestHarnessUserPoolClient.ClientSecret
+          OauthDiscovery:
+            DiscoveryUrl: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${TestHarnessUserPool}/.well-known/openid-configuration"
+
+  TestHarnessAgentRole:
+    Type: AWS::IAM::Role
+    Condition: DeployTestHarness
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+      Policies:
+        - PolicyName: HarnessRuntime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The agent loop calls Bedrock for inference.
+              - Effect: Allow
+                # The Converse API the agent loop uses is authorised by these
+                # two actions; there is no separate bedrock:Converse action.
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  # A managed agent loop: model, system prompt and tools declared inline. No
+  # container image, which is what makes a stack-owned agent practical.
+  TestHarnessAgent:
+    Type: AWS::BedrockAgentCore::Harness
+    Condition: DeployTestHarness
+    Properties:
+      HarnessName: !Sub "vardoger_test_${AWS::AccountId}"
+      ExecutionRoleArn: !GetAtt TestHarnessAgentRole.Arn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref TestHarnessModelId
+      SystemPrompt:
+        - Text: >-
+            You are a test assistant for evaluating a security monitor. When the
+            user asks anything, call the echo tool with their message as the
+            prompt argument, then report what it returned.
+      Tools:
+        # This is the toggle the Harness playground shows under "Tools". Making
+        # it declarative is what guarantees the agent actually routes through
+        # the monitored gateway rather than answering on its own.
+        - Type: agentcore_gateway
+          Name: vardoger-test-gateway
+          Config:
+            AgentCoreGateway:
+              GatewayArn: !GetAtt TestHarnessGateway.GatewayArn
+              OutboundAuth:
+                Oauth:
+                  ProviderArn: !GetAtt TestHarnessOAuthProvider.CredentialProviderArn
+                  Scopes:
+                    - vardoger-gateway/invoke
+
+  TestHarnessAgentEndpoint:
+    Type: AWS::BedrockAgentCore::HarnessEndpoint
+    Condition: DeployTestHarness
+    Properties:
+      HarnessId: !GetAtt TestHarnessAgent.HarnessId
+      EndpointName: DEFAULT
+
+  # --- S3 + CloudFront: Dashboard UI hosting ---
+  # Private SPA bucket (all public access blocked) served over HTTPS via a
+  # CloudFront distribution using Origin Access Control (OAC). This avoids the
+  # account-level S3 Block Public Access conflict that failed stack creation and
+  # closes the MITM-over-HTTP token-lift vector: the dashboard is HTTPS-only and
+  # the bucket is never publicly readable.
+  UiBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "vardoger-ui-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  UiOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "vardoger-ui-oac-${AWS::AccountId}-${AWS::Region}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Security headers delivered as real HTTP headers (CSP with frame-ancestors,
+  # HSTS, nosniff, referrer policy). A <meta> CSP cannot do frame-ancestors and
+  # would break the Vite dev server, so these live here (production only).
+  # connect-src allows self + https (the API origin varies per deployment);
+  # tighten to the specific API origin when hardening.
+  UiResponseHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "vardoger-ui-headers-${AWS::AccountId}-${AWS::Region}"
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            Override: true
+            ContentSecurityPolicy: "default-src 'self'; connect-src 'self' https:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            Override: true
+            FrameOption: DENY
+          ReferrerPolicy:
+            Override: true
+            ReferrerPolicy: strict-origin-when-cross-origin
+          StrictTransportSecurity:
+            Override: true
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            # Preload is intentionally NOT set: the default *.cloudfront.net
+            # domain is shared and cannot be HSTS-preloaded, so claiming it
+            # would be misleading. Enable Preload only behind a custom domain.
+            Preload: false
+
+  UiDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Agent Vardøger dashboard
+        DefaultRootObject: index.html
+        # SPA client-side routing: return index.html for 403/404 so deep links
+        # resolve. Served with HTTP 200.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        Origins:
+          - Id: UiS3Origin
+            DomainName: !GetAtt UiBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !GetAtt UiOriginAccessControl.Id
+        DefaultCacheBehavior:
+          TargetOriginId: UiS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          # AWS managed CachingOptimized policy.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref UiResponseHeadersPolicy
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: Application
+          Value: AgentVardoger
+        - Key: ManagedBy
+          Value: agent-vardoger
+        - Key: Scope
+          Value: !Ref ScopeId
+        - Key: DeploymentModel
+          Value: !Ref DeploymentModel
+        - !If [HasCostTag, {Key: !Ref CostAllocationTagKey, Value: !Ref CostAllocationTagValue}, !Ref "AWS::NoValue"]
+
+  UiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UiBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Only the CloudFront distribution (via OAC) may read the bucket.
+          - Sid: AllowCloudFrontOACRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${UiBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${UiDistribution}"
+
+Outputs:
+
+  TestHarnessAgentRuntimeArn:
+    Condition: DeployTestHarness
+    Description: >
+      Runtime behind the test harness agent. deploy.sh feeds this back in as
+      AgentRuntimeArn on its second pass so StopRuntimeSession is scoped to it.
+    Value: !GetAtt TestHarnessAgent.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
+
+  TestHarnessAgentName:
+    Condition: DeployTestHarness
+    Description: Harness name to select in the AgentCore Harness playground.
+    Value: !Sub "vardoger_test_${AWS::AccountId}"
+
+  TestHarnessGatewayUrl:
+    Condition: DeployTestHarness
+    Description: MCP endpoint of the test gateway. Append /mcp in the Test Console.
+    Value: !GetAtt TestHarnessGateway.GatewayUrl
+
+  TestHarnessGatewayArn:
+    Condition: DeployTestHarness
+    Description: ARN of the test gateway.
+    Value: !GetAtt TestHarnessGateway.GatewayArn
+
+  TestHarnessToolName:
+    Condition: DeployTestHarness
+    Description: >
+      Tool name to enter in the Test Console. Confirm with an MCP tools/list
+      call; the gateway is the authority on the exact string.
+    Value: echo
+
+  TestHarnessTokenEndpoint:
+    Condition: DeployTestHarness
+    Description: Cognito token endpoint for the client_credentials exchange.
+    Value: !Sub "https://${TestHarnessUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
+
+  TestHarnessClientId:
+    Condition: DeployTestHarness
+    Description: App client id for the token exchange. Secret is NOT an output - read it with describe-user-pool-client.
+    Value: !Ref TestHarnessUserPoolClient
+
+  TestHarnessUserPoolId:
+    Condition: DeployTestHarness
+    Description: Cognito user pool id, needed to read the client secret.
+    Value: !Ref TestHarnessUserPool
+  DispatcherFunctionArn:
+    Description: Attach as REQUEST interceptor on your AgentCore Gateway
+    Value: !GetAtt DispatcherFunction.Arn
+  AlertFunctionArn:
+    Value: !GetAtt AlertFunction.Arn
+  ControlPlaneApiUrl:
+    Condition: EnableCognito
+    Description: >
+      Authenticated control plane API base (Cognito JWT). Set VITE_API_BASE_URL
+      to this value + /api. Present when AuthMode is cognito or cognito+identity-center.
+    Value: !Sub "https://${ControlPlaneHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  ControlPlaneFunctionUrl:
+    Condition: UsesFunctionUrl
+    Description: >
+      Lambda Function URL. Present when AuthMode is none or token. In token mode
+      every request requires Authorization: Bearer <AuthSecret>. In none mode it
+      is open (DEV ONLY). Set VITE_API_BASE_URL to this value + /api.
+    Value: !GetAtt ControlPlaneUrl.FunctionUrl
+  CognitoUserPoolId:
+    Condition: EnableCognito
+    Description: Cognito User Pool Id backing the control plane authorizer.
+    Value: !Ref ControlPlaneUserPool
+  CognitoAppClientId:
+    Condition: EnableCognito
+    Description: Cognito App Client Id for the control plane UI.
+    Value: !Ref ControlPlaneUserPoolClient
+  CognitoHostedUiDomain:
+    Condition: EnableCognito
+    Description: Cognito Hosted UI domain for the OAuth code flow.
+    Value: !Sub "https://vardoger-${AWS::AccountId}-${AWS::Region}.auth.${AWS::Region}.amazoncognito.com"
+  UiBucketName:
+    Description: Upload the built frontend dist/ assets here
+    Value: !Ref UiBucket
+  DashboardUrl:
+    Description: HTTPS CloudFront URL for the dashboard
+    Value: !Sub "https://${UiDistribution.DomainName}"
+  DashboardDistributionId:
+    Description: CloudFront distribution id (use for cache invalidations on redeploy)
+    Value: !Ref UiDistribution
+  SessionRegistryTable:
+    Value: !Ref SessionRegistryTable
+  PromptHistoryTable:
+    Value: !Ref PromptHistoryTable
+  EvidenceBucketName:
+    Value: !Ref EvidenceBucket
+  AlertQueueUrl:
+    Value: !Ref AlertQueue
+  PromptIntakeQueueUrl:
+    Value: !Ref PromptIntakeQueue

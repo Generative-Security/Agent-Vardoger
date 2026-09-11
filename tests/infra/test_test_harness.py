@@ -1,0 +1,219 @@
+"""The optional test harness must stay off by default, and stay valid.
+
+The harness exists because assembling a working AgentCore gateway by hand has
+several independent ways to fail silently. The most costly one is encoded here
+as a test, because CloudFormation will not catch it and the AWS console will
+happily let you build it:
+
+    An AgentCore Runtime target cannot be attached to an MCP-protocol gateway.
+
+That pairing yields a gateway that reports READY, completes the MCP handshake,
+answers tools/list with [], and never invokes anything. Every component looks
+healthy while no prompt ever reaches the interceptor.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+TEMPLATE = ROOT / "infra/self-hosted.yaml"
+CONDITION = "DeployTestHarness"
+
+
+class _Loader(yaml.SafeLoader):
+    """SafeLoader that tolerates CloudFormation's short-form intrinsics."""
+
+
+def _intrinsic(loader: _Loader, tag_suffix: str, node: yaml.Node) -> dict:
+    key = "Fn::" + tag_suffix if tag_suffix != "Ref" else "Ref"
+    if isinstance(node, yaml.ScalarNode):
+        return {key: loader.construct_scalar(node)}
+    if isinstance(node, yaml.SequenceNode):
+        return {key: loader.construct_sequence(node, deep=True)}
+    return {key: loader.construct_mapping(node, deep=True)}
+
+
+_Loader.add_multi_constructor("!", _intrinsic)
+
+
+@pytest.fixture(scope="module")
+def template() -> dict:
+    return yaml.load(TEMPLATE.read_text(encoding="utf-8"), Loader=_Loader)
+
+
+@pytest.fixture(scope="module")
+def resources(template: dict) -> dict:
+    return template["Resources"]
+
+
+@pytest.fixture(scope="module")
+def gateway(resources: dict) -> dict:
+    return resources["TestHarnessGateway"]["Properties"]
+
+
+class TestOffByDefault:
+    def test_the_parameter_defaults_to_false(self, template: dict) -> None:
+        param = template["Parameters"]["DeployTestHarness"]
+        assert param["Default"] == "false"
+        assert set(param["AllowedValues"]) == {"true", "false"}
+
+    def test_every_harness_resource_is_gated(self, resources: dict) -> None:
+        """An ungated harness resource bills every operator who never asked."""
+        ungated = [
+            name
+            for name, body in resources.items()
+            if name.startswith("TestHarness") and body.get("Condition") != CONDITION
+        ]
+        assert not ungated, f"not gated on {CONDITION}: {ungated}"
+
+    def test_nothing_outside_the_harness_depends_on_it(self, resources: dict) -> None:
+        """A default deploy must not reference resources it never creates."""
+        harness = {n for n, b in resources.items() if b.get("Condition") == CONDITION}
+        offenders = []
+        for name, body in resources.items():
+            if body.get("Condition") == CONDITION:
+                continue
+            rendered = yaml.dump(body)
+            offenders += [f"{name} -> {h}" for h in harness if h in rendered]
+        assert not offenders, f"unconditional resources referencing the harness: {offenders}"
+
+
+class TestGatewayIsValid:
+    def test_the_target_is_a_lambda_not_a_runtime(self, resources: dict) -> None:
+        """The constraint this whole harness exists to avoid.
+
+        A Runtime target on an MCP gateway advertises no tools and silently
+        never fires the interceptor.
+        """
+        config = resources["TestHarnessTarget"]["Properties"]["TargetConfiguration"]
+        assert "Mcp" in config, f"expected an MCP target configuration, got {sorted(config)}"
+        assert "Lambda" in config["Mcp"], "the target must be a Lambda target"
+        assert "RuntimeTargetConfiguration" not in str(config)
+        assert "AgentCoreRuntime" not in str(config)
+
+    def test_the_gateway_is_mcp_protocol(self, gateway: dict) -> None:
+        assert gateway["ProtocolType"] == "MCP"
+
+    def test_the_target_advertises_at_least_one_tool(self, resources: dict) -> None:
+        """An empty tool list is the failure mode, not an edge case."""
+        schema = (
+            resources["TestHarnessTarget"]["Properties"]["TargetConfiguration"]
+            ["Mcp"]["Lambda"]["ToolSchema"]["InlinePayload"]
+        )
+        assert schema, "the target must expose a tool or no client can call anything"
+        assert all(t.get("Name") and t.get("InputSchema") for t in schema)
+
+
+class TestInterceptorIsPreWired:
+    def test_the_dispatcher_is_attached_as_a_request_interceptor(self, gateway: dict) -> None:
+        """This is quickstart step 3, done by the stack."""
+        (interceptor,) = gateway["InterceptorConfigurations"]
+        assert interceptor["InterceptionPoints"] == ["REQUEST"], (
+            "must be REQUEST: a RESPONSE interceptor cannot block a prompt in time"
+        )
+        arn = interceptor["Interceptor"]["Lambda"]["Arn"]
+        assert arn == {"Fn::GetAtt": "DispatcherFunction.Arn"}, arn
+
+    def test_request_headers_are_passed_to_the_interceptor(self, gateway: dict) -> None:
+        """Without this the parser never sees mcp-session-id and falls back to a
+        session id read from the request body, which a caller can forge."""
+        (interceptor,) = gateway["InterceptorConfigurations"]
+        assert interceptor["InputConfiguration"]["PassRequestHeaders"] is True
+
+    def test_the_gateway_may_invoke_the_dispatcher(self, resources: dict) -> None:
+        perm = resources["TestHarnessDispatcherPermission"]["Properties"]
+        assert perm["Principal"] == "bedrock-agentcore.amazonaws.com"
+        assert perm["SourceArn"] == {"Fn::GetAtt": "TestHarnessGateway.GatewayArn"}
+
+
+class TestAuthAndLeastPrivilege:
+    def test_inbound_auth_is_jwt_so_the_test_console_can_reach_it(self, gateway: dict) -> None:
+        """AWS_IAM would be unreachable from the browser: the Test Console
+        presents a bearer token and cannot sign SigV4."""
+        assert gateway["AuthorizerType"] == "CUSTOM_JWT"
+        assert "CustomJWTAuthorizer" in gateway["AuthorizerConfiguration"]
+
+    def test_the_gateway_role_can_only_invoke_the_echo_function(self, resources: dict) -> None:
+        """Narrower than the BedrockAgentCoreFullAccess role AWS creates, which
+        can invoke every Lambda in the account."""
+        policies = resources["TestHarnessGatewayRole"]["Properties"]["Policies"]
+        statements = [s for p in policies for s in p["PolicyDocument"]["Statement"]]
+        assert statements, "the gateway role must grant something"
+        for statement in statements:
+            assert statement["Action"] == "lambda:InvokeFunction"
+            assert statement["Resource"] == {"Fn::GetAtt": "TestHarnessEchoFunction.Arn"}
+
+    def test_the_client_secret_is_not_a_stack_output(self, template: dict) -> None:
+        """Outputs are readable by anyone who can describe the stack."""
+        rendered = yaml.dump(template.get("Outputs", {}))
+        assert "ClientSecret" not in rendered
+
+
+class TestHarnessAgentCompletesTheChain:
+    """The Harness is what makes enforcement testable.
+
+    Without it the stack builds a gateway with nothing in front of it: there is
+    no agent, therefore no runtime session, therefore StopRuntimeSession has
+    nothing to terminate. Detection could be exercised; the kill could not.
+    """
+
+    def test_the_gateway_is_attached_to_the_harness_as_a_tool(self, resources: dict) -> None:
+        """The Playground's Tools toggle, made declarative.
+
+        If the gateway is not a tool of the agent, the agent answers on its own
+        and no traffic ever crosses the interceptor.
+        """
+        (tool,) = resources["TestHarnessAgent"]["Properties"]["Tools"]
+        assert tool["Type"] == "agentcore_gateway"
+        gateway = tool["Config"]["AgentCoreGateway"]
+        assert gateway["GatewayArn"] == {"Fn::GetAtt": "TestHarnessGateway.GatewayArn"}
+
+    def test_the_harness_authenticates_to_a_jwt_gateway_with_oauth(self, resources: dict) -> None:
+        """Harness->Gateway defaults to SigV4, which a CUSTOM_JWT gateway rejects.
+
+        Omitting OutboundAuth here would produce a harness that cannot call the
+        very gateway it is attached to.
+        """
+        (tool,) = resources["TestHarnessAgent"]["Properties"]["Tools"]
+        oauth = tool["Config"]["AgentCoreGateway"]["OutboundAuth"]["Oauth"]
+        assert oauth["ProviderArn"] == {"Fn::GetAtt": "TestHarnessOAuthProvider.CredentialProviderArn"}
+        assert oauth["Scopes"] == ["vardoger-gateway/invoke"]
+
+    def test_both_sides_use_the_same_cognito_client(self, resources: dict) -> None:
+        """The gateway validates what the harness presents; a mismatch is a 401."""
+        provider = resources["TestHarnessOAuthProvider"]["Properties"]
+        config = provider["Oauth2ProviderConfigInput"]["CustomOauth2ProviderConfig"]
+        assert config["ClientId"] == {"Ref": "TestHarnessUserPoolClient"}
+        gateway_clients = (
+            resources["TestHarnessGateway"]["Properties"]["AuthorizerConfiguration"]
+            ["CustomJWTAuthorizer"]["AllowedClients"]
+        )
+        assert {"Ref": "TestHarnessUserPoolClient"} in gateway_clients
+
+    def test_the_runtime_arn_is_published_for_the_second_pass(self, template: dict) -> None:
+        """Gateway needs Dispatcher, Harness needs Gateway, Dispatcher would need
+        Harness. deploy.sh breaks the cycle using this output."""
+        output = template["Outputs"]["TestHarnessAgentRuntimeArn"]
+        assert output["Value"] == {
+            "Fn::GetAtt": "TestHarnessAgent.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn"
+        }
+
+    def test_the_kill_grant_is_valid_before_the_runtime_exists(self, template: dict) -> None:
+        """On the first pass AgentRuntimeArn is empty, and an empty string is not
+        a valid policy Resource. It must fall back to an account-scoped ARN."""
+        rendered = yaml.dump(template["Resources"])
+        assert "HasAgentRuntimeArn" in rendered, "the fallback condition is not used"
+        assert template["Parameters"]["AgentRuntimeArn"]["Default"] == ""
+
+
+class TestExistingGatewayPathStillWorks:
+    def test_the_gateway_arn_is_optional(self, template: dict) -> None:
+        assert template["Parameters"]["ExistingGatewayArn"]["Default"] == ""
+
+    def test_the_existing_gateway_permission_is_conditional(self, resources: dict) -> None:
+        """An empty SourceArn is not a valid ARN, so this cannot be unconditional
+        once the gateway ARN became optional."""
+        assert resources["LambdaInvokePermission"]["Condition"] == "HasExistingGateway"

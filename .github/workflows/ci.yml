@@ -1,0 +1,97 @@
+name: CI
+
+# Runs exactly what `make test`, `make lint`, and `make lint-infra` run locally,
+# plus the frontend build — so a contributor's green checkout means a green PR.
+#
+# The backend job runs on BOTH ends of the supported range:
+#   3.14 — the Lambda runtime the stack deploys (infra/*.yaml: python3.14)
+#   3.12 — the floor pyproject advertises via requires-python
+# Testing only the deployment target would leave the 3.12 claim unverified, and
+# testing only the floor would miss a runtime-specific failure at cold start.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing here writes to the repo, publishes, or needs a token.
+permissions:
+  contents: read
+
+# A newer push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (py${{ matrix.python-version }}) — tests, lint, templates
+    runs-on: ubuntu-latest
+    strategy:
+      # Report both legs; knowing it fails on only one is the diagnosis.
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev,api,ml]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Tests
+        run: pytest tests/ -q
+
+      # Template errors are otherwise reported by AWS only at stack-creation
+      # time, after the operator has waited through packaging and upload.
+      - name: CloudFormation templates
+        run: cfn-lint infra/self-hosted.yaml infra/managed-agent.yaml
+
+      # deploy.sh is a bash script shipped to users; a syntax error in it is a
+      # broken install, and nothing else in the suite would parse it.
+      - name: Deploy script syntax
+        run: bash -n scripts/deploy.sh
+
+      # The script must keep LF endings or it breaks under WSL and Linux (see
+      # .gitattributes). Checking the checked-out bytes proves the attribute
+      # is doing its job, not just that it is present.
+      - name: Deploy script line endings
+        run: |
+          if grep -qU $'\r' scripts/deploy.sh; then
+            echo "::error file=scripts/deploy.sh::CRLF line endings found; deploy.sh must be LF (see .gitattributes)"
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend — type check and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` installs exactly the lockfile, and fails if the lockfile and
+      # package.json have drifted apart.
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+
+      # "build" is `tsc && vite build`, so this is the type check as well. The
+      # dashboard is not exercised by the Python suite at all; without this job
+      # a type error ships silently and only surfaces when deploy.sh builds it.
+      - name: Type check and build
+        run: npm run build
+        working-directory: frontend

@@ -1,0 +1,337 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Agent Vardøger — Managed agent-side components (Model 2)"
+
+Parameters:
+  ExistingGatewayArn:
+    Type: String
+    Description: ARN of the existing AgentCore Gateway to monitor
+  AgentRuntimeArn:
+    Type: String
+    Description: Agent runtime ARN (scope for StopRuntimeSession)
+  AlertEmail:
+    Type: String
+    Default: ""
+  CodeS3Bucket:
+    Type: String
+    Description: S3 bucket containing Lambda code
+  CodeS3Key:
+    Type: String
+    Description: S3 key for Lambda zip
+  ManagedIntakeUrl:
+    Type: String
+    Description: Agent Vardøger managed service prompt intake URL
+  ManagedIntakeQueueArn:
+    Type: String
+    Description: >
+      ARN of the managed service prompt intake SQS queue. Required so the
+      dispatcher role can be granted sqs:SendMessage on it (the send is
+      cross-account, so the remote queue's resource policy must also allow this
+      account). Must correspond to ManagedIntakeUrl.
+  # Note: premium signatures are delivered via the cross-account S3 wiring below,
+  # not a feed URL. There is no signature "feed URL" consumer in the codebase.
+  # --- Premium signatures cross-account S3 wiring (parity with self-hosted) ---
+  PremiumSignatureBucket:
+    Type: String
+    Default: ""
+    Description: Cross-account S3 bucket hosting premium signature feeds (included with managed service).
+  PremiumSignaturePrefix:
+    Type: String
+    Default: "premium/"
+    Description: S3 prefix for premium signature objects.
+  PremiumSignatureRoleArn:
+    Type: String
+    Default: ""
+    Description: Optional cross-account role ARN to assume for premium signature access.
+  SessionTtlMinutes:
+    Type: Number
+    Default: 30
+  DetectionRetentionDays:
+    Type: Number
+    Default: 90
+  GlobalKillEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasPremiumBucket: !Not [!Equals [!Ref PremiumSignatureBucket, ""]]
+  HasPremiumRole: !Not [!Equals [!Ref PremiumSignatureRoleArn, ""]]
+
+Resources:
+  # Minimal agent-side: Dispatcher + Session Registry + Alert
+  # Tier 2/3 run in the managed backend.
+
+  SecurityAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: vardoger-security-alerts
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref SecurityAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  AlertDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: vardoger-alert-dlq
+      MessageRetentionPeriod: 1209600
+
+  AlertQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: vardoger-alert-queue
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AlertDlq.Arn
+        maxReceiveCount: 5
+
+  SessionRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerSessionRegistry
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref PromptGuardKmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  DetectionEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: VardogerDetectionEvents
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref PromptGuardKmsKey
+
+  PromptGuardKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Agent Vardøger prompt encryption key
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "vardoger-evidence-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "aws:kms"
+              KMSMasterKeyID: !Ref PromptGuardKmsKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  DispatcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vardoger-dispatcher-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VardogerDispatcher
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt SessionRegistryTable.Arn
+                  - !GetAtt DetectionEventsTable.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource:
+                  - !GetAtt AlertQueue.Arn
+                  # Cross-account send to the managed intake queue. The remote
+                  # queue's resource policy must also allow this account.
+                  - !Ref ManagedIntakeQueueArn
+              - Effect: Allow
+                Action: bedrock-agentcore:StopRuntimeSession
+                Resource:
+                  - !Ref AgentRuntimeArn
+                  - !Sub "${AgentRuntimeArn}/*"
+              # Encrypt blocked-prompt evidence with the CMK and store it.
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt PromptGuardKmsKey.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${EvidenceBucket.Arn}/*"
+
+  # --- IAM: Dispatcher premium signature policy (parity with self-hosted) ---
+  DispatcherPremiumPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasPremiumBucket
+    Properties:
+      PolicyName: VardogerDispatcherPremium
+      Roles:
+        - !Ref DispatcherRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${PremiumSignatureBucket}/*"
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub "arn:aws:s3:::${PremiumSignatureBucket}"
+          - !If
+            - HasPremiumRole
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Resource: !Ref PremiumSignatureRoleArn
+            - !Ref "AWS::NoValue"
+
+  DispatcherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vardoger-dispatcher
+      Runtime: python3.14
+      Handler: adapters.agentcore.dispatcher.lambda_handler
+      Role: !GetAtt DispatcherRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_SESSION_TABLE: !Ref SessionRegistryTable
+          VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
+          VARDOGER_DETECTION_RETENTION_DAYS: !Ref DetectionRetentionDays
+          VARDOGER_ALERT_QUEUE_URL: !Ref AlertQueue
+          VARDOGER_AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+          VARDOGER_TELEMETRY_MODE: managed
+          VARDOGER_MANAGED_INTAKE_URL: !Ref ManagedIntakeUrl
+          VARDOGER_KMS_KEY_ID: !Ref PromptGuardKmsKey
+          VARDOGER_EVIDENCE_S3_BUCKET: !Ref EvidenceBucket
+          VARDOGER_SESSION_TTL_MINUTES: !Ref SessionTtlMinutes
+          VARDOGER_GLOBAL_KILL_ENABLED: !Ref GlobalKillEnabled
+          VARDOGER_PREMIUM_SIGNATURE_BUCKET: !If [HasPremiumBucket, !Ref PremiumSignatureBucket, ""]
+          VARDOGER_PREMIUM_SIGNATURE_PREFIX: !Ref PremiumSignaturePrefix
+          VARDOGER_PREMIUM_SIGNATURE_ROLE_ARN: !If [HasPremiumRole, !Ref PremiumSignatureRoleArn, ""]
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DispatcherFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Ref ExistingGatewayArn
+
+  AlertRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vardoger-alert-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+      Policies:
+        - PolicyName: VardogerAlert
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SecurityAlertTopic
+              - Effect: Allow
+                Action: bedrock-agentcore:StopRuntimeSession
+                Resource:
+                  - !Ref AgentRuntimeArn
+                  - !Sub "${AgentRuntimeArn}/*"
+              - Effect: Allow
+                Action: securityhub:BatchImportFindings
+                Resource: "*"
+
+  AlertFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vardoger-alert
+      Runtime: python3.14
+      Handler: adapters.agentcore.alerting.lambda_handler
+      Role: !GetAtt AlertRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          VARDOGER_SNS_TOPIC_ARN: !Ref SecurityAlertTopic
+          VARDOGER_AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+
+  AlertEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt AlertQueue.Arn
+      FunctionName: !Ref AlertFunction
+      BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+
+Outputs:
+  DispatcherFunctionArn:
+    Description: Attach as REQUEST interceptor on your AgentCore Gateway
+    Value: !GetAtt DispatcherFunction.Arn
+  AlertQueueUrl:
+    Value: !Ref AlertQueue
+  SessionRegistryTable:
+    Value: !Ref SessionRegistryTable
+  EvidenceBucketName:
+    Value: !Ref EvidenceBucket

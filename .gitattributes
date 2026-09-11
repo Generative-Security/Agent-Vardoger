@@ -1,0 +1,9 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Shell scripts MUST check out with LF, on every platform.
+# Git for Windows defaults to core.autocrlf=true, which would otherwise give a
+# Windows clone a deploy.sh full of CRLF and a `#!/usr/bin/env bash\r` shebang.
+# Git Bash tolerates that; real Linux bash does not, and docs/quickstart.md
+# lists WSL as a supported way to run this script.
+*.sh text eol=lf

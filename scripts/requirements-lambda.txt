@@ -1,0 +1,21 @@
+# Pinned runtime dependencies for the Lambda deployment package.
+# Installed for the Lambda runtime platform (manylinux2014_x86_64, cp314) so
+# native wheels (cryptography, pydantic-core) match the execution environment.
+# Pin exact versions for reproducible builds; bump deliberately.
+#
+# These are the SAME versions the test suite runs against locally, so what CI
+# verifies is what Lambda executes. They previously drifted: the suite exercised
+# pydantic 2.13 while the bundle shipped 2.9.
+#
+# Every version below has a manylinux cp314 wheel AND still resolves for cp312
+# and cp313, so the dependency set and the runtime pin can be rolled back
+# independently of each other.
+#
+# Run `make audit-python` (pip-audit) after changing these.
+boto3==1.43.92
+pyyaml==6.0.3
+cryptography==50.0.1
+fastapi==0.141.1
+starlette==1.6.0
+mangum==0.22.0
+pydantic==2.13.5

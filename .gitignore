@@ -1,0 +1,95 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Build artifacts
+build/
+*.zip
+
+# Scratch / audit output (never commit)
+_audit*.txt
+_check*.txt
+
+# Environment and secrets
+.env
+.env.*
+# ...but always keep example env templates so a fresh clone is self-documenting.
+!.env.example
+!**/.env.example
+# Narrow, credential-specific patterns. Deliberately NOT broad globs like
+# *secret* / *credentials* / *.csv, which silently untrack legitimate source
+# files (e.g. a future control_plane/secrets_manager.py or a test fixture .csv).
+*accessKeys*.csv
+credentials.json
+*.pem
+*.pfx
+id_rsa
+id_rsa.*
+.aws/credentials
+
+# Node (frontend)
+node_modules/
+frontend/dist/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+# AI assistant / coding-agent artifacts.
+# These are local working files and internal review notes. They are excluded
+# from the published repository because they document the authoring process
+# rather than the product, and dangling references to internal review numbering
+# are confusing to outside contributors.
+.claude/
+CLAUDE.md
+.kiro/
+KIRO.md
+.cursor/
+.cursorrules
+.windsurfrules
+AGENTS.md
+.aider*
+.github/copilot-instructions.md
+.continue/
+.codeium/
+.roo/
+.specstory/
+
+# Local run/debug logs.
+*.log
+logs/
+
+# Internal review notes (not part of the product documentation).
+docs/SECURITY-REVIEW.md
+docs/CODE-QUALITY-REVIEW.md
+docs/*-REVIEW.md
+_audit.txt
+*.audit.txt

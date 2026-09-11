@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-vardoger"
+version = "0.1.0"
+description = "Open-source AI agent session security monitor"
+requires-python = ">=3.12"
+license = {text = "Elastic-2.0"}
+readme = "README.md"
+dependencies = [
+    "boto3>=1.35.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.115.0",
+    "mangum>=0.19.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic>=2.10.0",
+]
+ml = [
+    # For self-hosted Tier 2 ML inference
+    "cryptography>=44.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "moto[dynamodb,s3,sns,logs,kms,sts]>=5.0.0",
+    "ruff>=0.11.0",
+    # Validates infra/*.yaml against CloudFormation's own rules. Catches the
+    # class of error that only surfaces at stack-creation time otherwise —
+    # e.g. a parameter and a resource sharing a logical ID.
+    "cfn-lint>=1.22.0",
+]
+
+[project.urls]
+Repository = "https://github.com/Generative-Security/Agent-Vardoger"
+Documentation = "https://github.com/Generative-Security/Agent-Vardoger/tree/main/docs"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vardoger*", "adapters*", "signatures*", "control_plane*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+# Pin the rule set explicitly. Without this, the enabled rules follow whatever
+# defaults the contributor's ruff version happens to ship, so `make lint`
+# produces different output for different people.
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # FastAPI's dependency-injection idiom is `x = Depends(...)` in the
+    # signature, which is precisely what B008 flags. It is correct here.
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules are dominated by long literal regex tables and long keyword
+# argument lists. Wrapping a regex to satisfy a line-length rule risks changing
+# the pattern, and wrapping kwargs adds noise without aiding review, so E501 is
+# relaxed here rather than enforced by reformatting detection logic.
+"signatures/community/*.py" = ["E501"]
+"vardoger/detection/detection_policy.py" = ["E501"]
+"vardoger/detection/risk_scoring.py" = ["E501"]
+"vardoger/tier2/handler.py" = ["E501"]
+"vardoger/tier3/handler.py" = ["E501"]
+
+# Tests favour explicit, readable setup over style minimalism: nested `with`
+# blocks make each patched dependency obvious at the point it is introduced.
+"tests/*" = ["SIM117"]
+
+# The telemetry-mode branch is an annotated if/else; collapsing it to a ternary
+# would drop the comment that distinguishes local from managed routing.
+"adapters/agentcore/dispatcher.py" = ["SIM108"]

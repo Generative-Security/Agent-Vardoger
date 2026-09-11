@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Content-Security-Policy is NOT set here via <meta>: a meta CSP cannot
+      express frame-ancestors (clickjacking) and its script-src breaks Vite's
+      dev Fast-Refresh preamble. The production CSP + HSTS + X-Frame-Options are
+      delivered as real HTTP response headers by the CloudFront Response Headers
+      Policy (see infra/self-hosted.yaml: UiResponseHeadersPolicy).
+    -->
+    <title>Agent Vardøger</title>
+  </head>
+  <body class="bg-gray-950 text-gray-100">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
