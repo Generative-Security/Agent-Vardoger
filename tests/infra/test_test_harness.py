@@ -217,3 +217,108 @@ class TestExistingGatewayPathStillWorks:
         """An empty SourceArn is not a valid ARN, so this cannot be unconditional
         once the gateway ARN became optional."""
         assert resources["LambdaInvokePermission"]["Condition"] == "HasExistingGateway"
+
+
+class TestHarnessRoleHasWhatAgentCoreNeeds:
+    """The execution role's gaps surface only when someone uses the harness.
+
+    CloudFormation reports CREATE_COMPLETE for a harness whose role cannot pull
+    its own container, read its own memory, or fetch the OAuth token for the
+    gateway hop. Three separate AccessDeniedExceptions were hit in the
+    playground after a fully "successful" deploy:
+
+        GetResourceOauth2Token on token-vault/.../vardoger-test-<stack>
+        ListEvents on memory/vardoger_test_<account>-<suffix>
+
+    and the ECR Public pull, which does not even present as access-denied — the
+    session times out pulling the image.
+
+    Action set follows the sample execution role policy in the AgentCore docs:
+    docs.aws.amazon.com/bedrock-agentcore/latest/devguide/harness-security.html
+
+    A missing action here costs a full deploy-and-retry cycle, so the guard is
+    worth more than the usual template assertion.
+    """
+
+    # Grouped by the failure each one causes, so a breakage names the symptom.
+    REQUIRED = {
+        "reading its own memory": {
+            "bedrock-agentcore:CreateEvent",
+            "bedrock-agentcore:GetEvent",
+            "bedrock-agentcore:ListEvents",
+            "bedrock-agentcore:RetrieveMemoryRecords",
+        },
+        "fetching the gateway OAuth token": {
+            "bedrock-agentcore:GetResourceOauth2Token",
+            "secretsmanager:GetSecretValue",
+        },
+        "minting a workload identity": {
+            "bedrock-agentcore:GetWorkloadAccessToken",
+        },
+        "pulling its managed container": {
+            "ecr-public:GetAuthorizationToken",
+            "sts:GetServiceBearerToken",
+        },
+        "model inference": {
+            "bedrock:InvokeModel",
+        },
+    }
+
+    @staticmethod
+    def _actions(resources: dict) -> set[str]:
+        granted: set[str] = set()
+        for policy in resources["TestHarnessAgentRole"]["Properties"]["Policies"]:
+            for statement in policy["PolicyDocument"]["Statement"]:
+                if statement.get("Effect") != "Allow":
+                    continue
+                action = statement.get("Action", [])
+                granted.update([action] if isinstance(action, str) else action)
+        return granted
+
+    def test_every_required_action_is_granted(self, resources: dict) -> None:
+        granted = self._actions(resources)
+        missing = {
+            reason: sorted(needed - granted)
+            for reason, needed in self.REQUIRED.items()
+            if needed - granted
+        }
+        assert not missing, (
+            "TestHarnessAgentRole is missing actions the harness needs at "
+            f"invoke time: {missing}. The stack will still report "
+            "CREATE_COMPLETE; the failure appears in the playground."
+        )
+
+    def test_the_oauth_provider_grant_matches_the_provider_name(
+        self, resources: dict
+    ) -> None:
+        """A grant scoped to the wrong provider name denies exactly like no grant.
+
+        Both the resource and the policy derive the name from StackName, so they
+        can drift apart silently if either is edited alone.
+        """
+        provider = resources["TestHarnessOAuthProvider"]["Properties"]["Name"]["Fn::Sub"]
+        statements = [
+            s for policy in resources["TestHarnessAgentRole"]["Properties"]["Policies"]
+            for s in policy["PolicyDocument"]["Statement"]
+            if s.get("Sid") == "AgentCoreOAuth2TokenVaultPerProvider"
+        ]
+        assert statements, "no per-provider token-vault grant on the harness role"
+        resource = statements[0]["Resource"]["Fn::Sub"]
+        assert resource.endswith(f"/{provider}"), (
+            f"the token-vault grant ends in {resource.rsplit('/', 1)[-1]!r} but the "
+            f"provider is named {provider!r}"
+        )
+
+    def test_the_memory_grant_matches_the_harness_name(self, resources: dict) -> None:
+        """Memory is named after the harness plus a service-generated suffix."""
+        harness = resources["TestHarnessAgent"]["Properties"]["HarnessName"]["Fn::Sub"]
+        statements = [
+            s for policy in resources["TestHarnessAgentRole"]["Properties"]["Policies"]
+            for s in policy["PolicyDocument"]["Statement"]
+            if s.get("Sid") == "AgentCoreMemory"
+        ]
+        assert statements, "no memory grant on the harness role"
+        resource = statements[0]["Resource"]["Fn::Sub"]
+        assert f"memory/{harness}-*" in resource, (
+            f"memory grant {resource!r} does not cover the harness {harness!r}"
+        )

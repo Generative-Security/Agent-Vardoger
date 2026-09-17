@@ -1765,19 +1765,107 @@ Resources:
             Version: "2012-10-17"
             Statement:
               # The agent loop calls Bedrock for inference.
-              - Effect: Allow
+              - Sid: BedrockModelInvocation
+                Effect: Allow
                 # The Converse API the agent loop uses is authorised by these
                 # two actions; there is no separate bedrock:Converse action.
                 Action:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - "arn:aws:bedrock:*::foundation-model/*"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
+
+              # The harness pulls its managed container from ECR PUBLIC at the
+              # start of every session. Without these two the session never
+              # starts, and the failure is an image-pull timeout rather than an
+              # access-denied, so it does not name the missing permission.
+              - Sid: EcrPublicTokenAccess
+                Effect: Allow
+                Action: ecr-public:GetAuthorizationToken
                 Resource: "*"
-              - Effect: Allow
+              - Sid: StsForEcrPublicPull
+                Effect: Allow
+                Action: sts:GetServiceBearerToken
+                Resource: "*"
+
+              - Sid: XRayTracingAccess
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+
+              - Sid: CloudWatchLogs
+                Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+              - Sid: CloudWatchLogsDescribeGroups
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+              - Sid: CloudWatchMetricsPublish
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cloudwatch:namespace": bedrock-agentcore
+
+              # The harness mints a workload identity per session. The identity
+              # name is service-generated, so only the directory it lives in can
+              # be named here; the directory is already account-scoped.
+              - Sid: AgentCoreWorkloadIdentity
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                Resource:
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default"
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/*"
+
+              # A harness gets its own AgentCore Memory, named after the harness
+              # with a service-generated suffix. Reading conversation history is
+              # the FIRST thing the playground does, so without this the harness
+              # fails before any tool is even considered.
+              - Sid: AgentCoreMemory
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateEvent
+                  - bedrock-agentcore:DeleteEvent
+                  - bedrock-agentcore:GetEvent
+                  - bedrock-agentcore:ListEvents
+                  - bedrock-agentcore:RetrieveMemoryRecords
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/vardoger_test_${AWS::AccountId}-*"
+
+              # The gateway is CUSTOM_JWT, so the harness fetches an OAuth token
+              # from the token vault for every gateway hop. Without this the
+              # gateway tool fails to LOAD, which presents as the tool being
+              # broken rather than as a permissions gap on the harness side.
+              - Sid: AgentCoreOAuth2TokenVaultDefault
+                Effect: Allow
+                Action: bedrock-agentcore:GetResourceOauth2Token
+                Resource:
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:token-vault/default"
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default"
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/*"
+              - Sid: AgentCoreOAuth2TokenVaultPerProvider
+                Effect: Allow
+                Action: bedrock-agentcore:GetResourceOauth2Token
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:token-vault/default/oauth2credentialprovider/vardoger-test-${AWS::StackName}"
+              # The provider's client secret lives in a Secrets Manager secret
+              # the identity service owns. The trailing -* is the random suffix
+              # Secrets Manager appends to every secret ARN.
+              - Sid: AgentCoreOAuth2Secret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:bedrock-agentcore-identity!default/oauth2/vardoger-test-${AWS::StackName}-*"
 
   # A managed agent loop: model, system prompt and tools declared inline. No
   # container image, which is what makes a stack-owned agent practical.
