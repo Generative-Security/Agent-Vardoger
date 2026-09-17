@@ -136,15 +136,37 @@ class TestAuthAndLeastPrivilege:
         assert gateway["AuthorizerType"] == "CUSTOM_JWT"
         assert "CustomJWTAuthorizer" in gateway["AuthorizerConfiguration"]
 
-    def test_the_gateway_role_can_only_invoke_the_echo_function(self, resources: dict) -> None:
-        """Narrower than the BedrockAgentCoreFullAccess role AWS creates, which
-        can invoke every Lambda in the account."""
+    def test_the_gateway_role_invokes_exactly_two_named_functions(
+        self, resources: dict
+    ) -> None:
+        """The target and the interceptor, each named — and nothing else.
+
+        Narrower than the BedrockAgentCoreFullAccess role AWS creates, which can
+        invoke every Lambda in the account. The interceptor grant is not
+        optional: a resource-based policy on the dispatcher is necessary but not
+        sufficient, because the gateway invokes the interceptor under THIS role.
+        Without it the gateway returns 500 and the dispatcher log stays empty,
+        so the monitor looks absent rather than denied.
+        """
         policies = resources["TestHarnessGatewayRole"]["Properties"]["Policies"]
         statements = [s for p in policies for s in p["PolicyDocument"]["Statement"]]
         assert statements, "the gateway role must grant something"
+
+        granted = set()
         for statement in statements:
-            assert statement["Action"] == "lambda:InvokeFunction"
-            assert statement["Resource"] == {"Fn::GetAtt": "TestHarnessEchoFunction.Arn"}
+            assert statement["Action"] == "lambda:InvokeFunction", (
+                f"unexpected action on the gateway role: {statement['Action']!r}"
+            )
+            resource = statement["Resource"]
+            assert isinstance(resource, dict) and "Fn::GetAtt" in resource, (
+                f"the gateway role must name functions by ARN, not {resource!r}"
+            )
+            granted.add(resource["Fn::GetAtt"])
+
+        assert granted == {
+            "TestHarnessEchoFunction.Arn",
+            "DispatcherFunction.Arn",
+        }, f"gateway role invokes {sorted(granted)}"
 
     def test_the_client_secret_is_not_a_stack_output(self, template: dict) -> None:
         """Outputs are readable by anyone who can describe the stack."""

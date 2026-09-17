@@ -1654,12 +1654,24 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Scoped to the one echo function. The default gateway role AWS
+              # Two Lambdas, named individually. The default gateway role AWS
               # creates carries BedrockAgentCoreFullAccess, which can invoke
-              # every Lambda in the account; this one cannot.
+              # every Lambda in the account; this one invokes exactly these.
+              #
+              # The TARGET, which serves the tool call.
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !GetAtt TestHarnessEchoFunction.Arn
+              # The INTERCEPTOR. A resource-based policy on the dispatcher
+              # (TestHarnessDispatcherPermission) is necessary but NOT
+              # sufficient: the gateway invokes the interceptor under this
+              # role, so without an identity-based grant the call is denied
+              # before the dispatcher runs. That denial surfaces as a 500 from
+              # the gateway with NOTHING in the dispatcher log — the monitor
+              # appears absent rather than blocked, and the agent is down.
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt DispatcherFunction.Arn
 
   # --- The gateway ---
   TestHarnessGateway:
