@@ -46,6 +46,12 @@ gateway and has no agent runtime to terminate.
 > per-finding confidence and evidence guards. When a kill is declined the
 > outcome ledger records which gate stopped it.
 
+## Demo runtime
+
+| Variable | Default | Description |
+|---|---|---|
+| `VARDOGER_DEMO_RUNTIME` | `false` | Build a **self-managed** AgentCore Runtime for Vardøger to protect — a dependency-free echo agent packaged from `infra/demo_agent/main.py`. This is the runtime shape a production deployment has, and **the only one on which the session kill can be demonstrated**: AgentCore refuses `StopRuntimeSession` on a harness-managed runtime, so `VARDOGER_NEW_HARNESS` cannot prove enforcement however it is configured. |
+
 ## Observability
 
 | Variable | Default | Description |

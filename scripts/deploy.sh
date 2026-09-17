@@ -10,6 +10,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Build a self-contained test gateway instead of attaching to an existing one.
 NEW_HARNESS="${VARDOGER_NEW_HARNESS:-false}"
+DEMO_RUNTIME="${VARDOGER_DEMO_RUNTIME:-false}"          # self-managed demo agent
 # The runtime ARN actually passed to CloudFormation. Starts as whatever the
 # operator supplied; with the test harness the stack creates its own runtime
 # and this is overwritten from the outputs before the second pass.
@@ -143,6 +144,7 @@ echo "Stack:        $STACK_NAME"
 echo "Auth mode:    $AUTH_MODE"
 echo "Tier 1 mode:  $TIER1_MODE"
 echo "Log level:   $LOG_LEVEL"
+echo "Demo runtime: $DEMO_RUNTIME"
 echo "Detect fail:  $DETECTION_FAILURE_POLICY"
 echo "Tier 2 ML:    ${TIER2_ENDPOINT:-disabled}"
 echo "Tier 3:       $TIER3_ENABLED"
@@ -249,6 +251,33 @@ aws s3 cp "$BUILD_DIR/lambda.zip" "s3://$BUCKET_NAME/$CODE_S3_KEY" --quiet
 rm -rf "$BUILD_DIR"
 echo "  Uploaded $CODE_S3_KEY"
 
+# The demo agent is a SELF-MANAGED AgentCore Runtime, which is the only shape on
+# which the session kill can be demonstrated: AgentCore refuses
+# StopRuntimeSession on a harness-managed runtime. One dependency-free file, so
+# the package is just that file zipped -- no pip install and no arm64 wheels.
+DEMO_AGENT_S3_KEY="vardoger-demo-agent.zip"
+if [ "$DEMO_RUNTIME" = "true" ]; then
+    "$PYTHON_BIN" - "$PROJECT_ROOT/infra/demo_agent/main.py" "$BUILD_DIR/demo-agent.zip" <<'PYZIPDEMO'
+import sys, zipfile
+src, out = sys.argv[1], sys.argv[2]
+# main.py must sit at the ROOT of the archive: AgentCore resolves the entrypoint
+# relative to where the zip is unpacked (/var/task), so a nested path is simply
+# not found and the runtime never starts.
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+    zf.write(src, "main.py")
+PYZIPDEMO
+    DEMO_HASH=$("$PYTHON_BIN" - "$BUILD_DIR/demo-agent.zip" <<'PYHASHDEMO'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:16])
+PYHASHDEMO
+)
+    # Hashed key, for the same reason the Lambda package uses one: a fixed key
+    # means CloudFormation sees no change and keeps running the old code.
+    DEMO_AGENT_S3_KEY="vardoger-demo-agent-${DEMO_HASH}.zip"
+    aws s3 cp "$BUILD_DIR/demo-agent.zip" "s3://$BUCKET_NAME/$DEMO_AGENT_S3_KEY" --quiet
+    echo "  Uploaded $DEMO_AGENT_S3_KEY (demo agent)"
+fi
+
 # 4. Deploy CloudFormation
 echo "[4/6] Deploying CloudFormation stack..."
 aws cloudformation deploy \
@@ -268,6 +297,8 @@ aws cloudformation deploy \
         ${AUTH_SECRET_OVERRIDE[@]+"${AUTH_SECRET_OVERRIDE[@]}"} \
         "Tier1Mode=$TIER1_MODE" \
         "LogLevel=$LOG_LEVEL" \
+        "DeployDemoRuntime=$DEMO_RUNTIME" \
+        "DemoAgentS3Key=$DEMO_AGENT_S3_KEY" \
         "DetectionFailurePolicy=$DETECTION_FAILURE_POLICY" \
         "Tier2MlEndpoint=$TIER2_ENDPOINT" \
         "Tier2KillEnabled=$TIER2_KILL_ENABLED" \
@@ -381,6 +412,8 @@ if [ -n "$DASHBOARD_URL" ] && [ "$DASHBOARD_URL" != "None" ]; then
             ${AUTH_SECRET_OVERRIDE[@]+"${AUTH_SECRET_OVERRIDE[@]}"} \
             "Tier1Mode=$TIER1_MODE" \
         "LogLevel=$LOG_LEVEL" \
+        "DeployDemoRuntime=$DEMO_RUNTIME" \
+        "DemoAgentS3Key=$DEMO_AGENT_S3_KEY" \
             "DetectionFailurePolicy=$DETECTION_FAILURE_POLICY" \
             "Tier2MlEndpoint=$TIER2_ENDPOINT" \
             "Tier2KillEnabled=$TIER2_KILL_ENABLED" \

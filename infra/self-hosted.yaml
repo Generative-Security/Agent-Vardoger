@@ -26,6 +26,29 @@ Parameters:
       this harness does nothing BUT call a tool, so they fail with "Model
       produced invalid sequence as part of ToolUse" before the gateway is ever
       exercised. Later generations are fine - Nova 2 Lite is verified working.
+  DeployDemoRuntime:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Build a SELF-MANAGED AgentCore Runtime for Vardoger to protect. Off by
+      default. This is the runtime shape a production deployment uses, and the
+      only one on which the session kill can be demonstrated: AgentCore refuses
+      StopRuntimeSession on a harness-managed runtime, so DeployTestHarness
+      cannot prove enforcement no matter how it is configured.
+      The agent is a dependency-free echo target (infra/demo_agent/main.py)
+      packaged by deploy.sh.
+
+  DemoAgentS3Key:
+    Type: String
+    Default: "vardoger-demo-agent.zip"
+    Description: >
+      S3 key of the demo agent deployment package, in CodeS3Bucket. Set by
+      deploy.sh when DeployDemoRuntime=true; ignored otherwise. The default is a
+      placeholder rather than "" because S3Location.Prefix has a minimum length
+      of 1, and an empty default fails template validation even when the runtime
+      is not being deployed.
+
   DeployTestHarness:
     Type: String
     Default: "false"
@@ -205,6 +228,7 @@ Conditions:
   HasExistingGateway: !Not [!Equals [!Ref ExistingGatewayArn, ""]]
   HasAgentRuntimeArn: !Not [!Equals [!Ref AgentRuntimeArn, ""]]
   DeployTestHarness: !Equals [!Ref DeployTestHarness, "true"]
+  DeployDemoRuntime: !Equals [!Ref DeployDemoRuntime, "true"]
   # NOTE: EnableTier2 means "an ML endpoint is configured" — NOT "Tier 2 is
   # deployed". Tier2Function is deployed unconditionally because it is the only
   # writer of PromptHistory, which Prompt History and Tier 3 both read. This
@@ -1623,6 +1647,116 @@ Resources:
       InvokedViaFunctionUrl: true
 
   # ===========================================================================
+  # Optional self-managed demo runtime (DeployDemoRuntime=true)
+  #
+  # Exists because the test harness CANNOT demonstrate the session kill --
+  # AgentCore refuses StopRuntimeSession on a harness-managed runtime. This is a
+  # runtime the stack owns, so StopRuntimeSession applies to it, and it is the
+  # same shape a production deployment has.
+  # ===========================================================================
+  DemoAgentRuntimeRole:
+    Type: AWS::IAM::Role
+    Condition: DeployDemoRuntime
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+      Policies:
+        - PolicyName: DemoRuntime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Pull the deployment package. Without this the runtime never
+              # starts and the failure is an image/code fetch error rather than
+              # anything naming the bucket.
+              - Sid: ReadDeploymentPackage
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "arn:aws:s3:::${CodeS3Bucket}/*"
+              # The managed base image comes from ECR Public. Missing these two
+              # present as a session that times out starting, not as a denial.
+              - Sid: EcrPublicTokenAccess
+                Effect: Allow
+                Action: ecr-public:GetAuthorizationToken
+                Resource: "*"
+              - Sid: StsForEcrPublicPull
+                Effect: Allow
+                Action: sts:GetServiceBearerToken
+                Resource: "*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+              - Sid: CloudWatchLogsDescribeGroups
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+              - Sid: XRayTracingAccess
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+              - Sid: CloudWatchMetricsPublish
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cloudwatch:namespace": bedrock-agentcore
+              - Sid: AgentCoreWorkloadIdentity
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                Resource:
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default"
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/*"
+
+  DemoAgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Condition: DeployDemoRuntime
+    Properties:
+      # Underscores only: the name pattern is [a-zA-Z][a-zA-Z0-9_]{0,47}, so a
+      # hyphen here fails validation at create time.
+      AgentRuntimeName: !Sub "vardoger_demo_${AWS::AccountId}"
+      Description: Self-managed echo runtime for demonstrating Vardoger enforcement.
+      RoleArn: !GetAtt DemoAgentRuntimeRole.Arn
+      # HTTP, not MCP: this runtime IS the agent, and the gateway sits in front
+      # of it forwarding the caller's raw prompt.
+      ProtocolConfiguration: HTTP
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      AgentRuntimeArtifact:
+        CodeConfiguration:
+          Code:
+            S3:
+              Bucket: !Ref CodeS3Bucket
+              # "Prefix" is the full object key, despite the name.
+              Prefix: !Ref DemoAgentS3Key
+          # No opentelemetry-instrument wrapper: the agent has no dependencies,
+          # so the otel distro is not in the package and naming it would fail
+          # at start-up.
+          EntryPoint:
+            - main.py
+          Runtime: PYTHON_3_14
+
+  # ===========================================================================
   # Optional test harness (DeployTestHarness=true)
   # ===========================================================================
   # A complete, self-contained gateway so Vardoger can be evaluated without
@@ -2153,6 +2287,18 @@ Outputs:
     Condition: DeployTestHarness
     Description: Harness name to select in the AgentCore Harness playground.
     Value: !Sub "vardoger_test_${AWS::AccountId}"
+
+  DemoAgentRuntimeArn:
+    Condition: DeployDemoRuntime
+    Description: >
+      ARN of the self-managed demo runtime. deploy.sh feeds this back as
+      AgentRuntimeArn on its second pass so StopRuntimeSession is scoped to it.
+    Value: !GetAtt DemoAgentRuntime.AgentRuntimeArn
+
+  DemoAgentRuntimeId:
+    Condition: DeployDemoRuntime
+    Description: Id of the self-managed demo runtime.
+    Value: !GetAtt DemoAgentRuntime.AgentRuntimeId
 
   TestHarnessGatewayUrl:
     Condition: DeployTestHarness
