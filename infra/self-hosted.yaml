@@ -1810,13 +1810,6 @@ Resources:
                   Scopes:
                     - vardoger-gateway/invoke
 
-  TestHarnessAgentEndpoint:
-    Type: AWS::BedrockAgentCore::HarnessEndpoint
-    Condition: DeployTestHarness
-    Properties:
-      HarnessId: !GetAtt TestHarnessAgent.HarnessId
-      EndpointName: DEFAULT
-
   # --- S3 + CloudFront: Dashboard UI hosting ---
   # Private SPA bucket (all public access blocked) served over HTTPS via a
   # CloudFront distribution using Origin Access Control (OAC). This avoids the

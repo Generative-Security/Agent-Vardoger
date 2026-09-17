@@ -35,12 +35,11 @@ by wiring the interceptor itself.
 
 ## What gets created
 
-Fourteen resources, all conditional on `DeployTestHarness=true`:
+Thirteen resources, all conditional on `DeployTestHarness=true`:
 
 | Resource | Purpose |
 |---|---|
 | `TestHarnessAgent` | The AgentCore **Harness** — a managed agent loop with the gateway attached as a tool |
-| `TestHarnessAgentEndpoint` | Its `DEFAULT` endpoint |
 | `TestHarnessAgentRole` | Execution role: Bedrock inference plus logging |
 | `TestHarnessOAuthProvider` | OAuth2 credential provider the agent uses to call the gateway |
 | `TestHarnessGateway` | MCP-protocol gateway, `CUSTOM_JWT` inbound, dispatcher attached as a REQUEST interceptor |
@@ -53,6 +52,12 @@ Fourteen resources, all conditional on `DeployTestHarness=true`:
 | `TestHarnessResourceServer` | Defines the `vardoger-gateway/invoke` scope |
 | `TestHarnessUserPoolClient` | Machine-to-machine client for `client_credentials` |
 | `TestHarnessDispatcherPermission` | Lets the gateway invoke the dispatcher |
+
+There is deliberately **no endpoint resource**. AgentCore creates a `DEFAULT`
+endpoint for every harness automatically, always pointing at the latest
+version, and the name is reserved — declaring one fails the stack with
+`Endpoint name 'DEFAULT' is reserved`. Note that `cfn-lint` does not catch
+this: the property is a valid string, so only AWS rejects it, at create time.
 
 ```
 you ──► Harness (agent loop, Nova Pro)
@@ -243,7 +248,7 @@ export VARDOGER_NEW_HARNESS=false
 ./scripts/deploy.sh
 ```
 
-removes all ten. Deleting the stack removes them too — but empty the S3
+removes all thirteen. Deleting the stack removes them too — but empty the S3
 buckets first, or they survive the delete and collide with the next deploy;
 see [Removing the stack](quickstart.md#removing-the-stack). Two more things: the
 Cognito **domain** is globally unique per account and region, so a redeploy
