@@ -71,6 +71,7 @@ frontend/dist/
 .claude/
 CLAUDE.md
 TEST-MATRIX.md
+TEST-PLAN.md
 .kiro/
 KIRO.md
 .cursor/

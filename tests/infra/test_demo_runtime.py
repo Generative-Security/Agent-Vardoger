@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -131,7 +132,7 @@ class TestTheCodeDeploymentContract:
 class TestTheRoleCanActuallyStart:
     """Each missing permission presents as something other than a denial."""
 
-    REQUIRED = {
+    REQUIRED: ClassVar[set[str]] = {
         "s3:GetObject",                # pull the package
         "ecr-public:GetAuthorizationToken",  # managed base image
         "sts:GetServiceBearerToken",

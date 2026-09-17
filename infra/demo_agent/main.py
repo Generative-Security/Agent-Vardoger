@@ -53,7 +53,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's naming
+    def do_GET(self) -> None:
         if self.path.rstrip("/") == "/ping":
             # Healthy means "this process can answer", nothing more. Reporting
             # anything richer here would let a downstream problem take the
@@ -62,7 +62,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._respond(404, {"error": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         if self.path.rstrip("/") != "/invocations":
             self._respond(404, {"error": "not found"})
             return
@@ -116,12 +116,12 @@ class _Handler(BaseHTTPRequestHandler):
         also captures -- but keeping request logs on stdout leaves stderr
         meaning "something went wrong", which is worth more than tidiness.
         """
-        print("agent %s" % (fmt % args), flush=True)  # noqa: T201 - stdout IS the log
+        print("agent %s" % (fmt % args), flush=True)
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), _Handler)  # noqa: S104
-    print(f"demo agent listening on :{PORT}", flush=True)  # noqa: T201
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), _Handler)
+    print(f"demo agent listening on :{PORT}", flush=True)
     server.serve_forever()
 
 

@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -49,7 +50,7 @@ def _free_port() -> int:
 def agent_url() -> str:
     """Run the real agent, the way AgentCore runs it."""
     port = _free_port()
-    proc = subprocess.Popen(  # noqa: S603
+    proc = subprocess.Popen(
         [sys.executable, str(AGENT)],
         # Inherit the environment: a stripped one breaks the interpreter on
         # Windows, and the agent reads nothing from it but PORT.
@@ -60,7 +61,7 @@ def agent_url() -> str:
     base = f"http://127.0.0.1:{port}"
     for _ in range(50):  # up to ~5s
         try:
-            urllib.request.urlopen(f"{base}/ping", timeout=0.5).read()  # noqa: S310
+            urllib.request.urlopen(f"{base}/ping", timeout=0.5).read()
             break
         except Exception:
             time.sleep(0.1)
@@ -74,12 +75,12 @@ def agent_url() -> str:
 
 def _post(url: str, payload, headers: dict | None = None) -> tuple[int, dict]:
     data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
-    req = urllib.request.Request(  # noqa: S310
+    req = urllib.request.Request(
         url, data=data, method="POST",
         headers={"Content-Type": "application/json", **(headers or {})},
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode()
@@ -89,7 +90,7 @@ def _post(url: str, payload, headers: dict | None = None) -> tuple[int, dict]:
 class TestTheRuntimeContract:
     def test_ping_answers_200(self, agent_url: str) -> None:
         """AgentCore tears down a runtime whose ping fails."""
-        with urllib.request.urlopen(f"{agent_url}/ping", timeout=5) as resp:  # noqa: S310
+        with urllib.request.urlopen(f"{agent_url}/ping", timeout=5) as resp:
             assert resp.status == 200
             assert json.loads(resp.read().decode())["status"] == "healthy"
 
@@ -124,7 +125,7 @@ class TestItSurvivesHostileInput:
         status, _ = _post(f"{agent_url}/invocations", b"not json at all")
         assert status == 200
         # Still alive afterwards is the real assertion.
-        with urllib.request.urlopen(f"{agent_url}/ping", timeout=5) as resp:  # noqa: S310
+        with urllib.request.urlopen(f"{agent_url}/ping", timeout=5) as resp:
             assert resp.status == 200
 
     def test_an_empty_body_does_not_crash(self, agent_url: str) -> None:
@@ -133,7 +134,7 @@ class TestItSurvivesHostileInput:
 
     def test_an_unknown_path_is_404_not_a_crash(self, agent_url: str) -> None:
         try:
-            urllib.request.urlopen(f"{agent_url}/nope", timeout=5)  # noqa: S310
+            urllib.request.urlopen(f"{agent_url}/nope", timeout=5)
             pytest.fail("expected 404")
         except urllib.error.HTTPError as exc:
             assert exc.code == 404
@@ -157,7 +158,7 @@ class TestItSurvivesHostileInput:
         except (urllib.error.URLError, ConnectionError, OSError):
             pass  # connection closed mid-upload: the refusal, at transport level
 
-        with urllib.request.urlopen(f"{agent_url}/ping", timeout=5) as resp:  # noqa: S310
+        with urllib.request.urlopen(f"{agent_url}/ping", timeout=5) as resp:
             assert resp.status == 200, "the agent did not survive an oversized body"
 
 
@@ -171,7 +172,7 @@ class TestTheDeploymentPackageStaysOneFile:
     import error inside a runtime nobody can shell into.
     """
 
-    STDLIB_ONLY = {"json", "os", "http", "http.server", "__future__", "sys", "typing"}
+    STDLIB_ONLY: ClassVar[set[str]] = {"json", "os", "http", "http.server", "__future__", "sys", "typing"}
 
     def test_it_imports_nothing_third_party(self) -> None:
         tree = ast.parse(AGENT.read_text(encoding="utf-8"))
