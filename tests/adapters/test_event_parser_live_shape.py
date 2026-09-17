@@ -192,3 +192,61 @@ class TestTheHeaderDiagnosticIsSafe:
                          "params": {"arguments": {"prompt": "hi"}}},
             }}})
         assert "forwarded headers" not in caplog.text.lower()
+
+
+class TestBaggageKeysAreVisible:
+    """StopRuntimeSession needs the RUNTIME session id, which we may already have.
+
+    On the gateway-behind-the-agent topology the session id read from baggage
+    is the MCP/gateway session, not the AgentCore runtime session. Confirmed
+    live: the dispatcher recorded 8aae6fed-... while the runtime session was
+    e4d5f750-... and ran straight through the block, so StopRuntimeSession was
+    called with an id no runtime session has.
+
+    `_session_from_baggage` reads exactly one key, `session.id`. Any other
+    correlation identifier the caller propagates — AgentCore documents the
+    harness propagating them to Gateway — arrives and is discarded unseen. This
+    diagnostic makes the key names visible so the right one can be found.
+    """
+
+    import logging as _logging
+
+    def test_every_baggage_key_is_listed(self) -> None:
+        from adapters.agentcore.event_parser import _baggage_keys
+
+        keys = _baggage_keys({"_meta": {"baggage": "session.id=a,runtime.session.id=b"}})
+        assert keys == ["runtime.session.id", "session.id"]
+
+    def test_values_are_not_returned(self) -> None:
+        """Baggage is caller-authored; its values are untrusted content."""
+        from adapters.agentcore.event_parser import _baggage_keys
+
+        keys = _baggage_keys({"_meta": {"baggage": "token=SECRETVALUE,session.id=s1"}})
+        assert "SECRETVALUE" not in " ".join(keys)
+        assert "token" in keys, "the key name is what tells us it is there"
+
+    def test_malformed_baggage_does_not_raise(self) -> None:
+        from adapters.agentcore.event_parser import _baggage_keys
+
+        for junk in ({}, {"_meta": None}, {"_meta": {"baggage": None}},
+                     {"_meta": {"baggage": ",,="}}, {"_meta": {"baggage": 42}}):
+            assert isinstance(_baggage_keys(junk), list)
+
+    def test_keys_are_logged_at_debug_only(self, caplog) -> None:
+        from adapters.agentcore.event_parser import parse_gateway_event
+
+        event = {"mcp": {"gatewayRequest": {
+            "headers": {},
+            "body": {"method": "tools/call", "params": {
+                "arguments": {"prompt": "hi"},
+                "_meta": {"baggage": "session.id=s1,runtime.session.id=r1"},
+            }},
+        }}}
+        with caplog.at_level(self._logging.DEBUG, logger="adapters.agentcore.event_parser"):
+            parse_gateway_event(event)
+        assert "runtime.session.id" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(self._logging.INFO, logger="adapters.agentcore.event_parser"):
+            parse_gateway_event(event)
+        assert "Baggage keys" not in caplog.text

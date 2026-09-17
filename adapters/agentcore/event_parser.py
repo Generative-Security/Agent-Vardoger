@@ -230,6 +230,31 @@ def _account_from_principal_arn(arn: str) -> str:
     return ""
 
 
+def _baggage_keys(params: Any) -> list[str]:
+    """Return the key names present in params._meta.baggage, sorted.
+
+    Diagnostic only. `_session_from_baggage` reads exactly one key,
+    `session.id`, so any other correlation identifier the caller propagates --
+    including, possibly, the AgentCore runtime session id that
+    StopRuntimeSession actually needs -- arrives and is discarded unseen.
+
+    Names only. Baggage is caller-authored, so its VALUES are untrusted content
+    that does not belong in a log group; the names are enough to decide what is
+    worth parsing.
+    """
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    baggage = meta.get("baggage") if isinstance(meta, dict) else None
+    if not baggage:
+        return []
+    keys = []
+    for pair in str(baggage).split(","):
+        name, _, _value = pair.partition("=")
+        name = name.strip()
+        if name:
+            keys.append(name)
+    return sorted(set(keys))
+
+
 def _session_from_baggage(params: Any) -> str:
     """Return session.id from params._meta.baggage, or "".
 
@@ -394,6 +419,7 @@ def parse_gateway_event(event: dict[str, Any]) -> InterceptorEvent:
     # non-authentic and you need to know whether the header arrived at all.
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("Gateway forwarded headers: %s", ",".join(sorted(headers_ci)) or "(none)")
+        logger.debug("Baggage keys: %s", ",".join(_baggage_keys(params)) or "(none)")
 
     asserted_session_id = str(headers_ci.get("mcp-session-id") or "").strip()
     session_id = asserted_session_id
