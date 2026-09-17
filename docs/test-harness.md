@@ -240,13 +240,19 @@ enabled in this account and region, the harness deploys but fails at invocation.
 agent. Vardøger attaches to the gateway, so it inspects traffic crossing the
 gateway. A prompt reaches it as `tools/call` → `params.arguments`.
 
-**Avoid the Amazon Nova models here.** Their tool-use reliability is a
-documented AWS limitation, and this harness does nothing but call a tool, so the
-run fails with `modelStreamErrorException ... Model produced invalid sequence as
-part of ToolUse` before the gateway is ever reached — which reads as a broken
-harness rather than a model choice. The mitigations AWS documents (greedy
-decoding, higher max tokens) are not reachable from CloudFormation:
-`bedrockModelConfig` accepts only `modelId`, `apiFormat` and `additionalParams`.
+**Pick a model that calls tools reliably.** This harness does nothing but call
+a tool, so the model's tool-use behaviour is the whole test. The
+*first-generation* Nova models — `nova-pro-v1`, `nova-lite-v1`, `nova-micro-v1`
+— have a documented AWS limitation here, and fail with
+`modelStreamErrorException ... Model produced invalid sequence as part of
+ToolUse` before the gateway is ever reached, which reads as a broken harness
+rather than a model choice. The mitigations AWS documents (greedy decoding,
+higher max tokens) are not reachable from CloudFormation: `bedrockModelConfig`
+accepts only `modelId`, `apiFormat` and `additionalParams`.
+
+Later Nova generations do not have this problem. **Nova 2 Lite has been verified
+working on this harness** and is a cheaper choice than the default if you have
+access to it.
 
 **The gateway renames tools.** A target named `vardoger-echo` exposing a tool
 named `echo` is advertised to the model as **`vardoger-echo___echo`** —

@@ -350,23 +350,31 @@ class TestTheModelCanActuallyCallTools:
     """The harness does nothing but call a tool, so tool-use reliability is
     not a nice-to-have — it is the whole function.
 
-    Amazon Nova's tool-use reliability is a documented AWS limitation, with its
-    own troubleshooting page. With a Nova default the playground failed as:
+    The FIRST-generation Nova models have a documented tool-use limitation with
+    their own AWS troubleshooting page. With nova-pro-v1 as the default the
+    playground failed as:
 
         modelStreamErrorException ... Model produced invalid sequence as part
         of ToolUse
 
-    before the gateway was reached, so the monitor under test was never
-    exercised. The mitigations AWS documents (greedy decoding, higher max
-    tokens) are not reachable here: bedrockModelConfig exposes only modelId,
-    apiFormat and additionalParams — temperature and maxTokens are fields of
-    liteLlmModelConfig, not this one.
+    before the gateway was reached, so the monitor under test never ran. The
+    mitigations AWS documents (greedy decoding, higher max tokens) are not
+    reachable here: bedrockModelConfig exposes only modelId, apiFormat and
+    additionalParams — temperature and maxTokens belong to liteLlmModelConfig.
 
-    The model stays a parameter, so an operator can still choose Nova
-    deliberately. This only governs what ships as the default.
+    Scoped deliberately to the v1 family. This guard first read "any model with
+    'nova' in the name", which generalised from evidence that was entirely
+    about nova-pro-v1, nova-lite-v1 and nova-micro-v1. Nova 2 Lite was then
+    verified working on this exact harness, so the broad rule would have
+    blocked a model known to be fine. A guard that bans more than the evidence
+    supports is a guard people learn to delete.
+
+    The model stays a parameter either way; this only governs the default.
     """
 
-    UNRELIABLE_FOR_TOOL_USE = ("nova",)
+    # Matched as substrings against the model id, so the -v1 suffix is what
+    # keeps this off later generations.
+    UNRELIABLE_FOR_TOOL_USE = ("nova-pro-v1", "nova-lite-v1", "nova-micro-v1")
 
     def test_the_default_model_is_not_one_with_known_tool_use_problems(
         self, template: dict
@@ -374,10 +382,12 @@ class TestTheModelCanActuallyCallTools:
         model = template["Parameters"]["TestHarnessModelId"]["Default"].lower()
         bad = [name for name in self.UNRELIABLE_FOR_TOOL_USE if name in model]
         assert not bad, (
-            f"the default harness model {model!r} is a {bad[0]} model, whose "
-            "tool-use limitations are documented by AWS. This harness exists to "
-            "exercise a tool call, so the model fails before the gateway is "
-            "reached and the failure looks like a harness bug."
+            f"the default harness model {model!r} matches {bad[0]!r}, a "
+            "first-generation Nova model whose tool-use limitations are "
+            "documented by AWS. This harness exists to exercise a tool call, so "
+            "the model fails before the gateway is reached and the failure looks "
+            "like a harness bug. Later Nova generations are not covered by this "
+            "guard — Nova 2 Lite is verified working here."
         )
 
     def test_the_system_prompt_does_not_hardcode_the_tool_name(

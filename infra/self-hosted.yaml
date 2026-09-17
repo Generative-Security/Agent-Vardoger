@@ -16,10 +16,12 @@ Parameters:
       Bedrock model the test harness agent uses. Only read when
       DeployTestHarness=true. Model access must be enabled in this account and
       region, or the harness will fail to invoke. This is the model AgentCore
-      itself defaults to. Avoid the Amazon Nova models here: their tool-use
-      reliability is a documented limitation, and this harness does nothing BUT
-      call a tool, so a Nova default fails with "Model produced invalid sequence
-      as part of ToolUse" before the gateway is ever exercised.
+      itself defaults to. Avoid the FIRST-generation Nova models here
+      (nova-pro-v1, nova-lite-v1, nova-micro-v1): their tool-use reliability is
+      a documented limitation, and this harness does nothing BUT call a tool, so
+      they fail with "Model produced invalid sequence as part of ToolUse" before
+      the gateway is ever exercised. Later Nova generations are fine — Nova 2
+      Lite has been verified working on this harness.
   DeployTestHarness:
     Type: String
     Default: "false"
