@@ -39,7 +39,12 @@ from vardoger.tier3.similarity import (
     stable_hash,
 )
 
+from vardoger.logging_setup import configure_logging
+
 logger = logging.getLogger(__name__)
+# Applies VARDOGER_LOG_LEVEL. Without this the runtime's own root level
+# applies and every INFO line is dropped, leaving the log group empty.
+configure_logging()
 
 PROMPT_HISTORY_TABLE = os.environ.get("VARDOGER_PROMPT_HISTORY_TABLE", "VardogerPromptHistory")
 SESSION_RISK_TABLE = os.environ.get("VARDOGER_SESSION_RISK_TABLE", "VardogerSessionRisk")

@@ -31,7 +31,12 @@ from vardoger.coerce import to_str_list as _list_field
 from vardoger.health import ML_INFERENCE, report_degraded
 from vardoger.outcome_ledger import write_outcome
 
+from vardoger.logging_setup import configure_logging
+
 logger = logging.getLogger(__name__)
+# Applies VARDOGER_LOG_LEVEL. Without this the runtime's own root level
+# applies and every INFO line is dropped, leaving the log group empty.
+configure_logging()
 
 # ---------------------------------------------------------------------------
 # Environment configuration (all prefixed VARDOGER_)

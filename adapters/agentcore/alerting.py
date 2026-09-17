@@ -13,7 +13,12 @@ from typing import Any
 from adapters.agentcore.enforcement import terminate_session
 from vardoger import aws, config
 
+from vardoger.logging_setup import configure_logging
+
 logger = logging.getLogger(__name__)
+# Applies VARDOGER_LOG_LEVEL. Without this the runtime's own root level
+# applies and every INFO line is dropped, leaving the log group empty.
+configure_logging()
 
 
 def _publish_sns_alert(record: dict[str, Any]) -> None:

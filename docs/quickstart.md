@@ -339,6 +339,12 @@ gateway and has no agent runtime to terminate.
 > per-finding confidence and evidence guards. When a kill is declined the
 > outcome ledger records which gate stopped it.
 
+### Observability
+
+| Variable | Default | Description |
+|---|---|---|
+| `VARDOGER_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`, applied to every Vardoger Lambda. At `INFO` the dispatcher emits one line per evaluated prompt — decision, risk score, session id, whether that session id was asserted by the gateway or synthesised, source, envelope and matched signatures. Below `INFO` a *working* dispatcher writes nothing at all, so an empty log group cannot be distinguished from an interceptor that was never invoked. **Prompt text is never logged at any level**; encrypted evidence is where content lives. |
+
 ### Detection tiers
 
 | Variable | Default | Description |

@@ -54,6 +54,17 @@ Parameters:
     Type: Number
     Default: 90
     Description: Days before detection metadata expires
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: >
+      Application log level for every Vardoger Lambda. INFO emits one line per
+      evaluated prompt, which is what makes a working dispatcher visible in
+      CloudWatch at all; the log group is otherwise empty even while detection
+      runs normally. DEBUG is for incident work. Prompt text is never logged at
+      any level -- encrypted evidence is where content lives.
+
   Tier1Mode:
     Type: String
     Default: sidecar
@@ -687,6 +698,7 @@ Resources:
         S3Key: !Ref CodeS3Key
       Environment:
         Variables:
+          VARDOGER_LOG_LEVEL: !Ref LogLevel
           VARDOGER_SESSION_TABLE: !Ref SessionRegistryTable
           VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
           # The DetectionRetentionDays parameter previously reached no function,
@@ -889,6 +901,7 @@ Resources:
         S3Key: !Ref CodeS3Key
       Environment:
         Variables:
+          VARDOGER_LOG_LEVEL: !Ref LogLevel
           VARDOGER_SNS_TOPIC_ARN: !Ref SecurityAlertTopic
           VARDOGER_AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
       Tags:
@@ -976,6 +989,7 @@ Resources:
         S3Key: !Ref CodeS3Key
       Environment:
         Variables:
+          VARDOGER_LOG_LEVEL: !Ref LogLevel
           VARDOGER_SESSION_TABLE: !Ref SessionRegistryTable
           VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
           VARDOGER_AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
@@ -1098,6 +1112,7 @@ Resources:
         S3Key: !Ref CodeS3Key
       Environment:
         Variables:
+          VARDOGER_LOG_LEVEL: !Ref LogLevel
           VARDOGER_ML_ENDPOINT: !Ref Tier2MlEndpoint
           VARDOGER_PROMPT_HISTORY_TABLE: !Ref PromptHistoryTable
           VARDOGER_SESSION_RISK_TABLE: !Ref SessionRiskTable
@@ -1197,6 +1212,7 @@ Resources:
         S3Key: !Ref CodeS3Key
       Environment:
         Variables:
+          VARDOGER_LOG_LEVEL: !Ref LogLevel
           VARDOGER_PROMPT_HISTORY_TABLE: !Ref PromptHistoryTable
           VARDOGER_SESSION_RISK_TABLE: !Ref SessionRiskTable
           VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
@@ -1315,6 +1331,7 @@ Resources:
         S3Key: !Ref CodeS3Key
       Environment:
         Variables:
+          VARDOGER_LOG_LEVEL: !Ref LogLevel
           VARDOGER_SESSION_TABLE: !Ref SessionRegistryTable
           VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
           VARDOGER_PROMPT_HISTORY_TABLE: !Ref PromptHistoryTable

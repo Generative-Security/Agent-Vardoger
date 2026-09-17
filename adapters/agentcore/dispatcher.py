@@ -52,7 +52,12 @@ from vardoger.health import (
     report_degraded,
 )
 
+from vardoger.logging_setup import configure_logging
+
 logger = logging.getLogger(__name__)
+# Applies VARDOGER_LOG_LEVEL. Without this the runtime's own root level
+# applies and every INFO line is dropped, leaving the log group empty.
+configure_logging()
 
 _engine: DetectionEngine | None = None
 
@@ -375,6 +380,26 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             request_id=str(event.get("mcp", {}).get("gatewayRequest", {}).get("body", {}).get("id", "")),
         )
         transport_outcome = _copy_prompt_telemetry(message)
+
+        # The ONLY line emitted on a normal, allowed prompt. Without it a
+        # healthy dispatcher is indistinguishable from one that never ran --
+        # which is exactly how an empty log group was read as "the interceptor
+        # is not attached" while detection was in fact working.
+        #
+        # No prompt text: this lands in CloudWatch, and the prompt may be the
+        # attack itself. Evidence storage is the place for content.
+        logger.info(
+            "Evaluated prompt: decision=%s risk=%s session=%s authentic_session=%s "
+            "source=%s envelope=%s signatures=%s mode=%s",
+            result.decision,
+            result.risk_score,
+            parsed.session_id,
+            parsed.session_id_is_authentic,
+            parsed.source,
+            envelope_of(event) or "mcp",
+            ",".join(result.matched_signature_ids[:5]) or "-",
+            config.TIER1_MODE,
+        )
 
         if result.decision == "block":
             # The session dies in BOTH modes. What differs is WHEN.

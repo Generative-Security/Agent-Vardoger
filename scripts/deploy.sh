@@ -76,6 +76,7 @@ AUTH_MODE="${VARDOGER_AUTH_MODE:-token}"
 # passed on BOTH deploy passes below; omitting them from the second pass would
 # silently reset them to defaults. See docs/capabilities.md for what each does.
 TIER1_MODE="${VARDOGER_TIER1_MODE:-sidecar}"              # sidecar | gate
+LOG_LEVEL="${VARDOGER_LOG_LEVEL:-INFO}"                    # DEBUG | INFO | WARNING | ERROR
 DETECTION_FAILURE_POLICY="${VARDOGER_DETECTION_FAILURE_POLICY:-fail_open}"  # fail_open | fail_closed
 TIER2_KILL_ENABLED="${VARDOGER_TIER2_KILL_ENABLED:-false}"
 TIER3_ENABLED="${VARDOGER_TIER3_ENABLED:-false}"
@@ -141,6 +142,7 @@ echo "Region:       $REGION"
 echo "Stack:        $STACK_NAME"
 echo "Auth mode:    $AUTH_MODE"
 echo "Tier 1 mode:  $TIER1_MODE"
+echo "Log level:   $LOG_LEVEL"
 echo "Detect fail:  $DETECTION_FAILURE_POLICY"
 echo "Tier 2 ML:    ${TIER2_ENDPOINT:-disabled}"
 echo "Tier 3:       $TIER3_ENABLED"
@@ -265,6 +267,7 @@ aws cloudformation deploy \
         "AuthMode=$AUTH_MODE" \
         ${AUTH_SECRET_OVERRIDE[@]+"${AUTH_SECRET_OVERRIDE[@]}"} \
         "Tier1Mode=$TIER1_MODE" \
+        "LogLevel=$LOG_LEVEL" \
         "DetectionFailurePolicy=$DETECTION_FAILURE_POLICY" \
         "Tier2MlEndpoint=$TIER2_ENDPOINT" \
         "Tier2KillEnabled=$TIER2_KILL_ENABLED" \
@@ -377,6 +380,7 @@ if [ -n "$DASHBOARD_URL" ] && [ "$DASHBOARD_URL" != "None" ]; then
             "AuthMode=$AUTH_MODE" \
             ${AUTH_SECRET_OVERRIDE[@]+"${AUTH_SECRET_OVERRIDE[@]}"} \
             "Tier1Mode=$TIER1_MODE" \
+        "LogLevel=$LOG_LEVEL" \
             "DetectionFailurePolicy=$DETECTION_FAILURE_POLICY" \
             "Tier2MlEndpoint=$TIER2_ENDPOINT" \
             "Tier2KillEnabled=$TIER2_KILL_ENABLED" \

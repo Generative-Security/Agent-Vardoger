@@ -35,7 +35,12 @@ from adapters.agentcore.session_registry import (
     record_detection_event,
 )
 
+from vardoger.logging_setup import configure_logging
+
 logger = logging.getLogger(__name__)
+# Applies VARDOGER_LOG_LEVEL. Without this the runtime's own root level
+# applies and every INFO line is dropped, leaving the log group empty.
+configure_logging()
 
 _VALID_ACTIONS = frozenset({"terminate"})
 
