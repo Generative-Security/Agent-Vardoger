@@ -1,6 +1,7 @@
 import { Link, useLocation } from "react-router-dom";
 import { ReactNode } from "react";
-import { AppRole, useAuth } from "../../auth";
+import { AppRole, authMode, useAuth } from "../../auth";
+import { signOut } from "../../signin";
 
 interface NavItem {
   path: string;
@@ -94,6 +95,15 @@ export default function Layout({ children }: { children: ReactNode }) {
                   {ROLE_LABEL[role]}
                 </span>
               </div>
+              {authMode() !== "none" && (
+                <button
+                  type="button"
+                  onClick={signOut}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                >
+                  Sign out
+                </button>
+              )}
             </div>
           </div>
         </div>

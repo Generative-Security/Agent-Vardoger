@@ -111,6 +111,33 @@ Two things are preserved automatically and should be left unset: the auth secret
 (omitting the override is what keeps it) and the Function URL, CloudFront domain
 and dashboard URL, which do not regenerate.
 
+## Signing out
+
+The dashboard header carries a **Sign out** control in every mode except
+`none`. What it does depends on the mode, and the difference matters on a
+shared machine:
+
+- **`cognito`** — clears the stored token and the in-flight PKCE state, then
+  redirects to the Cognito Hosted UI `/logout` endpoint. That last step is the
+  one that ends the *IdP* session. Clearing browser storage alone would leave
+  the Cognito session cookie intact, so the next sign-in would complete
+  silently with no prompt: a sign-out that looks like it worked and did not.
+- **`token`** — clears the stored secret and returns to the sign-in view. There
+  is no IdP session to end.
+
+**Token lifetime differs by mode**, which surprises people moving from `token`
+to `cognito`. The `token`-mode shared secret is static and never expires, so a
+browser stays signed in indefinitely. Cognito access tokens expire (an hour by
+default), so the console will ask you to sign in again — that is the mode
+working, not a fault.
+
+An expired Cognito token presents badly: the API Gateway authorizer rejects the
+request before it reaches the app, and that rejection carries no CORS headers,
+so the browser reports a **network error** rather than a 401. If the dashboard
+suddenly shows "Network Error" or "Could not load sources", sign in again
+before suspecting the deployment — and confirm with
+`curl <api-url>/api/health`, which needs no credentials in any mode.
+
 ## Removing the stack
 
 ```bash

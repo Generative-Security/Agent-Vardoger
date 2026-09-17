@@ -16,6 +16,50 @@ const REDIRECT_URI =
 const VERIFIER_KEY = "vardoger.pkce_verifier";
 const STATE_KEY = "vardoger.oauth_state";
 
+// signOut: End the session properly.
+//
+// Order matters. Local state is cleared FIRST so that a failure to reach the
+// Hosted UI still leaves this browser without a usable token, rather than
+// leaving the operator signed in because a redirect did not happen.
+//
+// Then, in cognito mode, redirect to the Hosted UI /logout endpoint. Clearing
+// localStorage alone would leave the Cognito session cookie intact on the
+// Hosted UI domain, so the next sign-in would complete silently with no
+// prompt — a sign-out that looks like it worked and did not. On a shared or
+// abandoned machine that is the whole point of the button.
+export function signOut(): void {
+  clearLocalSession();
+
+  if (!cognitoConfigured()) {
+    // token / none mode: no IdP session exists, so clearing local state IS the
+    // sign-out. Reload to drop any in-memory state and show the sign-in view.
+    window.location.replace(window.location.origin);
+    return;
+  }
+
+  const url =
+    `${DOMAIN.replace(/\/$/, "")}/logout` +
+    `?client_id=${encodeURIComponent(CLIENT_ID)}` +
+    `&logout_uri=${encodeURIComponent(REDIRECT_URI)}`;
+  window.location.replace(url);
+}
+
+// clearLocalSession: Remove every credential this app stores, not just the
+// token. The PKCE verifier and OAuth state are single-use, and leaving them
+// behind lets a stale in-flight exchange complete after a sign-out.
+function clearLocalSession(): void {
+  setToken("");
+  try {
+    window.sessionStorage.removeItem(VERIFIER_KEY);
+    window.sessionStorage.removeItem(STATE_KEY);
+    window.localStorage.removeItem(VERIFIER_KEY);
+    window.localStorage.removeItem(STATE_KEY);
+  } catch {
+    // Storage can throw in private-browsing modes. A failure to clear these
+    // must not prevent the token removal above or the redirect below.
+  }
+}
+
 export function cognitoConfigured(): boolean {
   return Boolean(DOMAIN && CLIENT_ID && REDIRECT_URI);
 }
