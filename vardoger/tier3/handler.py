@@ -28,6 +28,7 @@ from vardoger import policy as policy_module
 from vardoger.coerce import to_float as _to_float
 from vardoger.coerce import to_int as _to_int
 from vardoger.coerce import to_str_tuple as _string_list
+from vardoger.logging_setup import configure_logging
 from vardoger.outcome_ledger import write_outcome
 from vardoger.tier3.embedding import get_embedder
 from vardoger.tier3.similarity import (
@@ -38,8 +39,6 @@ from vardoger.tier3.similarity import (
     simhash,
     stable_hash,
 )
-
-from vardoger.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
 # Applies VARDOGER_LOG_LEVEL. Without this the runtime's own root level

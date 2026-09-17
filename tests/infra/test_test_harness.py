@@ -14,6 +14,7 @@ healthy while no prompt ever reaches the interceptor.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -263,7 +264,7 @@ class TestHarnessRoleHasWhatAgentCoreNeeds:
     """
 
     # Grouped by the failure each one causes, so a breakage names the symptom.
-    REQUIRED = {
+    REQUIRED: ClassVar[dict[str, set[str]]] = {
         "reading its own memory": {
             "bedrock-agentcore:CreateEvent",
             "bedrock-agentcore:GetEvent",

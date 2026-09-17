@@ -39,6 +39,7 @@ from adapters.agentcore.session_registry import (
     ensure_session,
     get_session,
     record_detection_event,
+    record_kill_outcome,
     record_session_evaluation,
 )
 from vardoger import aws, config
@@ -51,7 +52,6 @@ from vardoger.health import (
     PROMPT_TELEMETRY,
     report_degraded,
 )
-
 from vardoger.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -437,6 +437,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 except Exception:
                     logger.exception("StopRuntimeSession failed; still refusing the prompt")
             message["kill_outcome"] = kill_outcome
+            # Visible immediately, so a kill in flight reads as in flight rather
+            # than as nothing having happened. The alert Lambda overwrites this
+            # with the real result; a row still saying "deferred" later means
+            # the deferred kill never ran.
+            record_kill_outcome(parsed.session_id, kill_outcome)
 
             # Persist encrypted prompt evidence for forensics (best-effort; a
             # no-op when no KMS key / evidence bucket is configured). This is

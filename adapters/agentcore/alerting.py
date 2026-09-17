@@ -10,9 +10,9 @@ import logging
 import time
 from typing import Any
 
-from adapters.agentcore.enforcement import terminate_session
+from adapters.agentcore.enforcement import terminate_session_detailed
+from adapters.agentcore.session_registry import record_kill_outcome
 from vardoger import aws, config
-
 from vardoger.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -119,14 +119,27 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         try:
             body = json.loads(sqs_record["body"])
 
-            # Re-terminate in case the inline kill was partial. Prefer the real
-            # runtime session id when the producer supplied it.
+            # Execute the kill. In sidecar mode THIS is the kill -- the
+            # dispatcher deferred it here so the agent could finish answering
+            # the triggering prompt -- and in gate mode it re-terminates in case
+            # the inline attempt was partial. Prefer the real runtime session id
+            # when the producer supplied it.
             agent_runtime_arn = body.get("agent_runtime_arn", "")
             if agent_runtime_arn:
-                terminate_session(
-                    body["session_id"],
-                    agent_runtime_arn,
-                    runtime_session_id=body.get("runtime_session_id", ""),
+                runtime_session_id = body.get("runtime_session_id", "")
+                # _detailed, not the boolean wrapper: the outcome is the point.
+                # Discarding it left every session recorded as "deferred"
+                # forever, so a kill that failed and a kill still in flight were
+                # the same row.
+                outcome = terminate_session_detailed(
+                    session_id=body["session_id"],
+                    agent_runtime_arn=agent_runtime_arn,
+                    reason=body.get("reason", "Security detection"),
+                    runtime_session_id=runtime_session_id,
+                )
+                body["kill_outcome"] = outcome
+                record_kill_outcome(
+                    body["session_id"], outcome, runtime_session_id=runtime_session_id
                 )
 
             _publish_sns_alert(body)

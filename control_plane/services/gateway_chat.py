@@ -283,7 +283,7 @@ def _extract_http_payload(body: str) -> dict:
     return {"status": "success", "response": json.dumps(document)}
 
 
-def _post(url: str, data: bytes, headers: dict[str, str]) -> tuple[str, int, "ChatResponse | None"]:
+def _post(url: str, data: bytes, headers: dict[str, str]) -> tuple[str, int, ChatResponse | None]:
     """POST to an already-validated gateway URL.
 
     Returns (body, http_status, error_response). The third element is non-None

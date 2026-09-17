@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from vardoger import aws, config
 from vardoger.coerce import to_float, to_int
-from vardoger.health import DETECTION_EVENTS, report_degraded
+from vardoger.health import DETECTION_EVENTS, ENFORCEMENT, report_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +221,50 @@ def mark_session_decision(
             ":now": now,
         },
     )
+
+
+def record_kill_outcome(
+    session_id: str,
+    outcome: str,
+    runtime_session_id: str = "",
+) -> None:
+    """Record what the session kill actually did.
+
+    Without this the outcome lived only in the SQS alert message, so nothing an
+    operator can query knew whether StopRuntimeSession succeeded, was refused,
+    or was never attempted. "Session terminated" and "we asked AWS to terminate
+    the session and it declined" are very different facts, and they were
+    indistinguishable.
+
+    Written twice per kill by design: once by the dispatcher with the outcome it
+    has when it returns (including ``deferred``), then again by the alert Lambda
+    with the real result. A row still reading ``deferred`` long after the fact
+    therefore means the deferred kill never ran -- which is itself the signal.
+
+    Best-effort: failing to record the outcome must not change what the kill
+    did. Reported as degraded so a silently missing outcome is visible.
+    """
+    now = int(time.time())
+    try:
+        _table().update_item(
+            Key={"session_id": session_id},
+            UpdateExpression=(
+                "SET kill_outcome = :outcome, kill_outcome_at = :now"
+                ", kill_runtime_session_id = :rt"
+            ),
+            ExpressionAttributeValues={
+                ":outcome": outcome,
+                ":now": now,
+                ":rt": runtime_session_id or session_id,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Failed to record kill outcome for session %s", session_id)
+        report_degraded(
+            ENFORCEMENT,
+            f"kill outcome write failed: {type(exc).__name__}",
+            session_id=session_id,
+        )
 
 
 def record_detection_event(

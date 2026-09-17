@@ -25,8 +25,9 @@ def _alert_body(session_id="s1", risk_score=12):
 class TestPartialBatch:
     @patch("adapters.agentcore.alerting._publish_security_hub_finding")
     @patch("adapters.agentcore.alerting._publish_sns_alert")
-    @patch("adapters.agentcore.alerting.terminate_session")
-    def test_all_success_no_failures(self, mock_term, mock_sns, mock_sh):
+    @patch("adapters.agentcore.alerting.record_kill_outcome")
+    @patch("adapters.agentcore.alerting.terminate_session_detailed")
+    def test_all_success_no_failures(self, mock_term, mock_record, mock_sns, mock_sh):
         event = _sqs_event([("m1", _alert_body("a")), ("m2", _alert_body("b"))])
         result = alerting.lambda_handler(event, None)
         assert result["processed"] == 2
@@ -34,8 +35,9 @@ class TestPartialBatch:
 
     @patch("adapters.agentcore.alerting._publish_security_hub_finding")
     @patch("adapters.agentcore.alerting._publish_sns_alert")
-    @patch("adapters.agentcore.alerting.terminate_session")
-    def test_one_failure_only_that_item_retried(self, mock_term, mock_sns, mock_sh):
+    @patch("adapters.agentcore.alerting.record_kill_outcome")
+    @patch("adapters.agentcore.alerting.terminate_session_detailed")
+    def test_one_failure_only_that_item_retried(self, mock_term, mock_record, mock_sns, mock_sh):
         # Make the SNS publish blow up for the second record only.
         def sns_side_effect(body):
             if body["session_id"] == "b":
@@ -50,8 +52,9 @@ class TestPartialBatch:
 
     @patch("adapters.agentcore.alerting._publish_security_hub_finding")
     @patch("adapters.agentcore.alerting._publish_sns_alert")
-    @patch("adapters.agentcore.alerting.terminate_session")
-    def test_forwards_runtime_session_id_on_reterminate(self, mock_term, mock_sns, mock_sh):
+    @patch("adapters.agentcore.alerting.record_kill_outcome")
+    @patch("adapters.agentcore.alerting.terminate_session_detailed")
+    def test_forwards_runtime_session_id_on_reterminate(self, mock_term, mock_record, mock_sns, mock_sh):
         event = _sqs_event([("m1", _alert_body("a"))])
         alerting.lambda_handler(event, None)
         _, kwargs = mock_term.call_args

@@ -34,7 +34,6 @@ from adapters.agentcore.session_registry import (
     mark_session_decision,
     record_detection_event,
 )
-
 from vardoger.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)

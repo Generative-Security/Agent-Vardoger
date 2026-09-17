@@ -29,9 +29,8 @@ from vardoger.coerce import to_float as _to_float
 from vardoger.coerce import to_int as _to_int
 from vardoger.coerce import to_str_list as _list_field
 from vardoger.health import ML_INFERENCE, report_degraded
-from vardoger.outcome_ledger import write_outcome
-
 from vardoger.logging_setup import configure_logging
+from vardoger.outcome_ledger import write_outcome
 
 logger = logging.getLogger(__name__)
 # Applies VARDOGER_LOG_LEVEL. Without this the runtime's own root level
