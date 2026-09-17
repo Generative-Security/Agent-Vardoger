@@ -129,6 +129,7 @@ All behavioral toggles are set the same way — export the env var before `./scr
 | [Testing detection](docs/test-console.md) | Test Console setup, calling the gateway directly, what the interceptor actually sees |
 | [Configuration](docs/configuration.md) | Every environment variable, enforcement posture, teardown |
 | [Test harness](docs/test-harness.md) | The self-contained rig for when you have no gateway |
+| [Demo runtime](docs/demo-runtime.md) | Self-managed runtime + protocol-less gateway — the topology where the session kill can be proven |
 
 ## Signatures
 

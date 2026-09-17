@@ -88,8 +88,14 @@ def test_the_harness_resource_count_in_the_docs_is_right(resources: dict[str, di
     ten") described the same set and disagreed with each other, so neither was
     load-bearing enough for anyone to notice when it drifted.
     """
+    # Both gates: turning the harness on deploys its own resources AND the
+    # shared Cognito pool, so that is the count the documentation describes.
+    # The pool moved to a shared condition when the demo runtime's gateway
+    # started using it; counting only DeployTestHarness would have silently
+    # dropped four resources from the doc's own subject.
+    harness_gates = {"DeployTestHarness", "NeedsGatewayAuth"}
     actual = sum(1 for body in resources.values()
-                 if body.get("Condition") == "DeployTestHarness")
+                 if body.get("Condition") in harness_gates)
     text = HARNESS_DOC.read_text(encoding="utf-8")
 
     claims = {

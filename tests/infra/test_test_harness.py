@@ -62,13 +62,40 @@ class TestOffByDefault:
         assert set(param["AllowedValues"]) == {"true", "false"}
 
     def test_every_harness_resource_is_gated(self, resources: dict) -> None:
-        """An ungated harness resource bills every operator who never asked."""
+        """Nothing harness-related may deploy unconditionally.
+
+        Two gates are acceptable. `DeployTestHarness` is the harness itself;
+        `NeedsGatewayAuth` is the Cognito pool, which the demo runtime's gateway
+        shares because both need a JWT issuer and two identical pools would
+        serve no purpose. Any OTHER condition — or none — means a test resource
+        is reaching deployments that never asked for one.
+        """
+        allowed = {"DeployTestHarness", "NeedsGatewayAuth"}
         ungated = [
-            name
-            for name, body in resources.items()
-            if name.startswith("TestHarness") and body.get("Condition") != CONDITION
+            name for name, body in resources.items()
+            if name.startswith("TestHarness") and body.get("Condition") not in allowed
         ]
-        assert not ungated, f"not gated on {CONDITION}: {ungated}"
+        assert not ungated, f"harness resources outside {sorted(allowed)}: {ungated}"
+
+    def test_the_shared_cognito_resources_are_exactly_the_auth_ones(
+        self, resources: dict
+    ) -> None:
+        """Sharing is for inbound auth only.
+
+        If the echo Lambda or the harness gateway ever landed on the shared
+        condition, deploying the demo alone would silently build harness
+        infrastructure nobody asked for.
+        """
+        shared = sorted(
+            name for name, body in resources.items()
+            if body.get("Condition") == "NeedsGatewayAuth"
+        )
+        assert shared == [
+            "TestHarnessResourceServer",
+            "TestHarnessUserPool",
+            "TestHarnessUserPoolClient",
+            "TestHarnessUserPoolDomain",
+        ], f"unexpected resources shared between harness and demo: {shared}"
 
     def test_nothing_outside_the_harness_depends_on_it(self, resources: dict) -> None:
         """A default deploy must not reference resources it never creates."""

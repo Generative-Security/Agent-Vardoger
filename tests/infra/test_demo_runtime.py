@@ -189,3 +189,132 @@ class TestDeployScriptAgreement:
                 f"{param} appears {self.SCRIPT.count(param)} times; it must be on "
                 "both CloudFormation passes"
             )
+
+
+class TestTheGatewayTopology:
+    """A protocol-less gateway IN FRONT of the runtime.
+
+    This is the topology the prompt-injection claim rests on: the interceptor
+    sees the caller's raw prompt rather than an agent's tool-call arguments.
+    Two things about it are easy to get wrong and silent when wrong.
+    """
+
+    @pytest.fixture()
+    def gateway(self, template: dict) -> dict:
+        return template["Resources"]["DemoGateway"]["Properties"]
+
+    def test_the_gateway_declares_no_protocol_type(self, gateway: dict) -> None:
+        """Omitting ProtocolType is what makes it protocol-less.
+
+        Setting MCP would do two damaging things at once: make the interceptor
+        see tool calls instead of prompts, and make an AgentCore Runtime target
+        invalid — the pairing that yields `tools/list: []` while every component
+        reports READY and no prompt ever reaches the monitor.
+        """
+        assert "ProtocolType" not in gateway, (
+            "DemoGateway sets ProtocolType, so it is no longer protocol-less"
+        )
+
+    def test_the_target_routes_to_the_runtime_over_http(self, template: dict) -> None:
+        target = template["Resources"]["DemoGatewayTarget"]["Properties"]
+        config = target["TargetConfiguration"]
+        assert "Mcp" not in config, "an MCP target cannot front a runtime"
+        arn = config["Http"]["AgentcoreRuntime"]["Arn"]
+        assert arn == {"Fn::GetAtt": "DemoAgentRuntime.AgentRuntimeArn"}
+
+    def test_the_target_name_is_the_url_path(self, template: dict) -> None:
+        """A protocol-less gateway routes by /<targetName>/invocations, so the
+        name IS the endpoint. Renaming it moves the URL silently."""
+        target = template["Resources"]["DemoGatewayTarget"]["Properties"]
+        assert target["Name"] == "agent"
+        script = DEPLOY_SH.read_text(encoding="utf-8")
+        assert "/agent/invocations" in script, (
+            "deploy.sh prints an endpoint that disagrees with the target name"
+        )
+
+    def test_the_dispatcher_is_attached_as_a_request_interceptor(
+        self, gateway: dict
+    ) -> None:
+        interceptors = gateway["InterceptorConfigurations"]
+        assert len(interceptors) == 1
+        assert interceptors[0]["Interceptor"]["Lambda"]["Arn"] == {
+            "Fn::GetAtt": "DispatcherFunction.Arn"
+        }
+        assert "REQUEST" in interceptors[0]["InterceptionPoints"]
+
+    def test_request_headers_are_passed_to_the_interceptor(self, gateway: dict) -> None:
+        """Without this the interceptor receives no headers at all."""
+        interceptors = gateway["InterceptorConfigurations"]
+        assert interceptors[0]["InputConfiguration"]["PassRequestHeaders"] is True
+
+    def test_inbound_auth_is_jwt_so_the_test_console_can_reach_it(
+        self, gateway: dict
+    ) -> None:
+        """AWS_IAM would make the gateway unreachable from the browser: the
+        console presents a bearer token and cannot sign SigV4."""
+        assert gateway["AuthorizerType"] == "CUSTOM_JWT"
+
+
+class TestTheGatewayMayInvokeBothHops:
+    """Both grants are required, and one of them failed silently before.
+
+    A resource policy on the dispatcher is necessary but NOT sufficient: the
+    gateway invokes the interceptor under its own role. Missing that grant
+    produced a 500 from the gateway with an entirely empty dispatcher log — the
+    monitor looked absent rather than denied.
+    """
+
+    @pytest.fixture()
+    def statements(self, template: dict) -> list[dict]:
+        role = template["Resources"]["DemoGatewayRole"]["Properties"]
+        return [st for p in role["Policies"] for st in p["PolicyDocument"]["Statement"]]
+
+    def test_it_may_invoke_the_runtime(self, statements: list[dict]) -> None:
+        actions = {st.get("Action") for st in statements}
+        assert "bedrock-agentcore:InvokeAgentRuntime" in actions
+
+    def test_it_may_invoke_the_interceptor(self, statements: list[dict]) -> None:
+        invoke = [st for st in statements if st.get("Action") == "lambda:InvokeFunction"]
+        assert invoke, (
+            "the gateway role cannot invoke the dispatcher, so the interceptor "
+            "is never called and the gateway returns 500 with an empty log"
+        )
+        assert invoke[0]["Resource"] == {"Fn::GetAtt": "DispatcherFunction.Arn"}
+
+    def test_the_resource_policy_exists_too(self, template: dict) -> None:
+        perm = template["Resources"]["DemoDispatcherPermission"]["Properties"]
+        assert perm["Principal"] == "bedrock-agentcore.amazonaws.com"
+        assert perm["SourceArn"] == {"Fn::GetAtt": "DemoGateway.GatewayArn"}
+
+    def test_the_role_grants_nothing_else(self, statements: list[dict]) -> None:
+        """Narrower than the default gateway role, which can invoke every
+        Lambda in the account."""
+        actions = {st.get("Action") for st in statements}
+        assert actions == {
+            "bedrock-agentcore:InvokeAgentRuntime",
+            "lambda:InvokeFunction",
+        }, f"demo gateway role grants {sorted(actions)}"
+
+
+class TestTheKillGrantIsScopedToTheDemoRuntime:
+    """The whole point of the demo: a runtime StopRuntimeSession can stop."""
+
+    SCRIPT = DEPLOY_SH.read_text(encoding="utf-8")
+
+    def test_the_runtime_arn_is_fed_back_on_the_second_pass(self) -> None:
+        assert "DemoAgentRuntimeArn" in self.SCRIPT, (
+            "deploy.sh never reads the demo runtime ARN, so the kill grant stays "
+            "widened to every runtime in the account"
+        )
+        assert 'AGENT_RUNTIME_ARN_EFFECTIVE="$DEMO_RUNTIME_ARN"' in self.SCRIPT
+
+    def test_the_demo_runtime_wins_when_both_are_deployed(self) -> None:
+        """A harness-managed runtime refuses StopRuntimeSession, so scoping the
+        kill to it would make enforcement undemonstrable even with the demo
+        present."""
+        demo_at = self.SCRIPT.index('DEMO_RUNTIME_ARN"')
+        harness_at = self.SCRIPT.index('HARNESS_RUNTIME_ARN"')
+        assert demo_at < harness_at, (
+            "the harness runtime ARN is read after the demo one and would "
+            "overwrite it, scoping the kill to a runtime that cannot be stopped"
+        )

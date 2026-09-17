@@ -229,6 +229,11 @@ Conditions:
   HasAgentRuntimeArn: !Not [!Equals [!Ref AgentRuntimeArn, ""]]
   DeployTestHarness: !Equals [!Ref DeployTestHarness, "true"]
   DeployDemoRuntime: !Equals [!Ref DeployDemoRuntime, "true"]
+  # Cognito inbound auth is shared: the harness gateway and the demo gateway
+  # both need a JWT issuer, and two identical pools would serve no purpose.
+  NeedsGatewayAuth: !Or
+    - !Condition DeployTestHarness
+    - !Condition DeployDemoRuntime
   # NOTE: EnableTier2 means "an ML endpoint is configured" — NOT "Tier 2 is
   # deployed". Tier2Function is deployed unconditionally because it is the only
   # writer of PromptHistory, which Prompt History and Tier 3 both read. This
@@ -1756,6 +1761,94 @@ Resources:
             - main.py
           Runtime: PYTHON_3_14
 
+  DemoGatewayRole:
+    Type: AWS::IAM::Role
+    Condition: DeployDemoRuntime
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+      Policies:
+        - PolicyName: InvokeDemoRuntime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The target hop: forward the caller's request to the runtime.
+              - Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource:
+                  - !GetAtt DemoAgentRuntime.AgentRuntimeArn
+                  - !Sub "${DemoAgentRuntime.AgentRuntimeArn}/*"
+              # The INTERCEPTOR hop. A resource policy on the dispatcher is
+              # necessary but NOT sufficient: the gateway invokes the
+              # interceptor under this role, and without an identity-based
+              # grant the call is denied before the dispatcher runs. That
+              # failure shows as a 500 from the gateway with an EMPTY
+              # dispatcher log, so the monitor looks absent rather than denied.
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt DispatcherFunction.Arn
+
+  DemoGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Condition: DeployDemoRuntime
+    Properties:
+      Name: !Sub "vardoger-demo-${AWS::AccountId}"
+      Description: Protocol-less gateway in front of the demo runtime.
+      RoleArn: !GetAtt DemoGatewayRole.Arn
+      # NO ProtocolType, deliberately. Omitting it makes this a protocol-less
+      # gateway that forwards the caller's raw request; setting MCP would make
+      # it the behind-the-agent topology AND would make an AgentCore Runtime
+      # target invalid, which is the pairing that silently yields tools/list []
+      # while every component reports READY.
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${TestHarnessUserPool}/.well-known/openid-configuration"
+          AllowedClients:
+            - !Ref TestHarnessUserPoolClient
+      InterceptorConfigurations:
+        - Interceptor:
+            Lambda:
+              Arn: !GetAtt DispatcherFunction.Arn
+          InterceptionPoints:
+            - REQUEST
+          InputConfiguration:
+            # Without this the interceptor sees no request headers at all.
+            PassRequestHeaders: true
+
+  DemoGatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Condition: DeployDemoRuntime
+    Properties:
+      GatewayIdentifier: !Ref DemoGateway
+      # The target NAME is the URL path: a protocol-less gateway routes to
+      # /<targetName>/invocations. Renaming this changes the endpoint.
+      Name: agent
+      Description: Routes the caller's prompt to the self-managed demo runtime.
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Http:
+          AgentcoreRuntime:
+            Arn: !GetAtt DemoAgentRuntime.AgentRuntimeArn
+
+  DemoDispatcherPermission:
+    Type: AWS::Lambda::Permission
+    Condition: DeployDemoRuntime
+    Properties:
+      FunctionName: !Ref DispatcherFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !GetAtt DemoGateway.GatewayArn
+
   # ===========================================================================
   # Optional test harness (DeployTestHarness=true)
   # ===========================================================================
@@ -1774,7 +1867,7 @@ Resources:
   # is unreachable from the browser no matter how it is configured.
   TestHarnessUserPool:
     Type: AWS::Cognito::UserPool
-    Condition: DeployTestHarness
+    Condition: NeedsGatewayAuth
     Properties:
       UserPoolName: !Sub "vardoger-test-harness-${AWS::StackName}"
       AdminCreateUserConfig:
@@ -1782,7 +1875,7 @@ Resources:
 
   TestHarnessUserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
-    Condition: DeployTestHarness
+    Condition: NeedsGatewayAuth
     Properties:
       Domain: !Sub "vardoger-th-${AWS::AccountId}-${AWS::Region}"
       UserPoolId: !Ref TestHarnessUserPool
@@ -1791,7 +1884,7 @@ Resources:
   # a scope to request, and a scope must belong to a resource server.
   TestHarnessResourceServer:
     Type: AWS::Cognito::UserPoolResourceServer
-    Condition: DeployTestHarness
+    Condition: NeedsGatewayAuth
     Properties:
       UserPoolId: !Ref TestHarnessUserPool
       Identifier: vardoger-gateway
@@ -1804,7 +1897,7 @@ Resources:
   # client id and secret for an access token.
   TestHarnessUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
-    Condition: DeployTestHarness
+    Condition: NeedsGatewayAuth
     DependsOn: TestHarnessResourceServer
     Properties:
       UserPoolId: !Ref TestHarnessUserPool
@@ -2287,6 +2380,19 @@ Outputs:
     Condition: DeployTestHarness
     Description: Harness name to select in the AgentCore Harness playground.
     Value: !Sub "vardoger_test_${AWS::AccountId}"
+
+  DemoGatewayUrl:
+    Condition: DeployDemoRuntime
+    Description: >
+      Endpoint of the demo gateway. The caller's prompt goes to
+      <this>/agent/invocations - a protocol-less gateway routes by target name.
+      Paste that full path into the Test Console with the tool name LEFT EMPTY.
+    Value: !GetAtt DemoGateway.GatewayUrl
+
+  DemoGatewayArn:
+    Condition: DeployDemoRuntime
+    Description: ARN of the demo gateway.
+    Value: !GetAtt DemoGateway.GatewayArn
 
   DemoAgentRuntimeArn:
     Condition: DeployDemoRuntime

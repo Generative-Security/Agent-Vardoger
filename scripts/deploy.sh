@@ -377,6 +377,19 @@ DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
 # and Dispatcher would need Harness. The second pass breaks that cycle by
 # supplying the ARN once it exists, narrowing the StopRuntimeSession grant from
 # "any runtime in this account" to exactly this one.
+# The demo runtime takes precedence when both are deployed: it is the only one
+# StopRuntimeSession can actually stop, so scoping the kill grant to it is what
+# makes enforcement demonstrable. A harness-managed runtime refuses the call.
+if [ "$DEMO_RUNTIME" = "true" ]; then
+    DEMO_RUNTIME_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`DemoAgentRuntimeArn`].OutputValue' --output text 2>/dev/null || true)
+    if [ -n "$DEMO_RUNTIME_ARN" ] && [ "$DEMO_RUNTIME_ARN" != "None" ]; then
+        AGENT_RUNTIME_ARN_EFFECTIVE="$DEMO_RUNTIME_ARN"
+        echo ""
+        echo "  Demo runtime: $DEMO_RUNTIME_ARN"
+    fi
+fi
+
 if [ "$NEW_HARNESS" = "true" ]; then
     HARNESS_RUNTIME_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
         --query 'Stacks[0].Outputs[?OutputKey==`TestHarnessAgentRuntimeArn`].OutputValue' --output text 2>/dev/null || true)
@@ -500,6 +513,22 @@ if [ "$AUTH_MODE" = "token" ]; then
     else
         echo "  Using the VARDOGER_AUTH_SECRET you supplied."
     fi
+    echo ""
+fi
+if [ "$DEMO_RUNTIME" = "true" ]; then
+    DEMO_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`DemoGatewayUrl`].OutputValue' --output text 2>/dev/null || true)
+    echo "=== Demo runtime (self-managed) ==="
+    echo ""
+    echo "A protocol-less gateway sits IN FRONT of a self-managed agent runtime,"
+    echo "with the dispatcher already attached as a REQUEST interceptor."
+    echo ""
+    echo "  Prompt endpoint: ${DEMO_URL%/}/agent/invocations"
+    echo "  Test Console:    paste that URL with the tool name LEFT EMPTY."
+    echo ""
+    echo "  Unlike the test harness, this runtime CAN be stopped, so the session"
+    echo "  kill is demonstrable here. AgentCore refuses StopRuntimeSession on a"
+    echo "  harness-managed runtime."
     echo ""
 fi
 if [ "$NEW_HARNESS" = "true" ]; then

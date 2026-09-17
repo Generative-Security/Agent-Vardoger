@@ -66,10 +66,11 @@ recorded as `unsupported` — distinct from `failed`, because nothing is broken 
 and it raises the `DegradedComponents` alarm, since the operator is not getting
 the enforcement they may believe they have.
 
-**To exercise the real session kill**, point Vardøger at a **self-managed**
-runtime (one you created directly, not through a harness). That is also the
-shape a production deployment takes; the harness exists to make the rest of the
-system reachable without assembling AgentCore by hand.
+**To exercise the real session kill**, use the
+[demo runtime](demo-runtime.md) (`VARDOGER_DEMO_RUNTIME=true`), which builds a
+self-managed runtime the stack owns and a protocol-less gateway in front of it.
+That is also the shape a production deployment takes; the harness exists to make
+the rest of the system reachable without assembling AgentCore by hand.
 
 ## Why it exists
 
