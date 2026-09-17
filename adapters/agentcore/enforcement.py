@@ -28,6 +28,13 @@ TERMINATE_FAILED = "failed"
 # StopRuntimeSession call had been made yet. The session is already recorded as
 # terminated in the registry, so the next prompt on it is refused regardless.
 TERMINATE_DEFERRED = "deferred"
+# The runtime cannot be stopped at all: AgentCore refuses StopRuntimeSession on
+# a harness-managed runtime ("is managed by a harness and cannot be invoked
+# directly"). Structural, not transient -- the call was correct and no retry or
+# permission change will help. Distinct from "failed" so an operator can tell a
+# broken kill from one that was never available, and distinct from "unverified"
+# because nothing about the session id is in doubt.
+TERMINATE_UNSUPPORTED = "unsupported"
 
 
 def _default_runtime_session_id(session_id: str) -> str:
@@ -85,6 +92,28 @@ def terminate_session_detailed(
                 effective_runtime_session_id,
             )
             return TERMINATE_UNVERIFIED
+        if code == "ValidationException" and "managed by a harness" in str(exc):
+            # Not a defect in this call. AgentCore does not permit stopping a
+            # session on a harness-managed runtime at all, so the kill is
+            # unavailable by construction and containment falls back to denying
+            # further tool calls at the gateway. Logged at WARNING rather than
+            # ERROR: nothing here is broken, but the operator is not getting
+            # the enforcement they think they are.
+            logger.warning(
+                "StopRuntimeSession is not available on a harness-managed runtime "
+                "(session_id=%s runtime=%s). The session stays recorded as "
+                "terminated, so further tool calls through the gateway are refused, "
+                "but the agent runtime keeps running. Use a self-managed runtime if "
+                "the session kill is required.",
+                session_id,
+                agent_runtime_arn,
+            )
+            report_degraded(
+                ENFORCEMENT,
+                "StopRuntimeSession unavailable: runtime is harness-managed",
+                session_id=session_id,
+            )
+            return TERMINATE_UNSUPPORTED
         logger.error("Failed to terminate session %s: %s", session_id, exc)
         report_degraded(ENFORCEMENT, f"StopRuntimeSession failed: {type(exc).__name__}", session_id=session_id)
         return TERMINATE_FAILED
@@ -112,4 +141,7 @@ def terminate_session(
         reason=reason,
         runtime_session_id=runtime_session_id,
     )
+    # TERMINATE_UNSUPPORTED is deliberately excluded: the runtime is still
+    # running and will stay running, so reporting True here would be the same
+    # success-shaped lie the outcome was introduced to prevent.
     return outcome in (TERMINATE_CONFIRMED, TERMINATE_UNVERIFIED)

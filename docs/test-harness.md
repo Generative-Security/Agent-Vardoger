@@ -32,6 +32,45 @@ demonstration.
 Turn 3 being refused is what proves session correlation: both turns mapped to
 the same session, so the termination recorded on turn 2 was found on turn 3.
 
+## What the harness CANNOT demonstrate
+
+**The session kill does not work on this harness, and that is a property of the
+harness rather than of Vardøger.** AgentCore refuses to stop a session on a
+harness-managed runtime:
+
+```
+ValidationException: The agent runtime arn:...:runtime/harness_... is managed
+by a harness and cannot be invoked directly
+```
+
+Everything up to that call is correct, and was measured live: detection fires
+(`risk=12`), the session is recorded terminated, risk accumulates across turns,
+the deferred kill reaches the alert Lambda, and `StopRuntimeSession` is invoked
+with the right session id — confirmed identical to the runtime's own
+`sessionId` — and the right runtime ARN. AWS declines it, and no retry or
+permission change will help.
+
+What you still get, and can verify here:
+
+| | Works on the harness? |
+|---|---|
+| Detection, scoring, signature matching | Yes |
+| Session correlation and risk accumulation across turns | Yes |
+| Session recorded as terminated | Yes |
+| Further tool calls refused | Yes |
+| **Agent runtime actually stopped** | **No** |
+
+So containment on the harness is **tool denial**: the agent keeps running and
+keeps talking, but it cannot reach anything through the gateway. The outcome is
+recorded as `unsupported` — distinct from `failed`, because nothing is broken —
+and it raises the `DegradedComponents` alarm, since the operator is not getting
+the enforcement they may believe they have.
+
+**To exercise the real session kill**, point Vardøger at a **self-managed**
+runtime (one you created directly, not through a harness). That is also the
+shape a production deployment takes; the harness exists to make the rest of the
+system reachable without assembling AgentCore by hand.
+
 ## Why it exists
 
 Attaching Vardøger to your own gateway means getting several independent things
