@@ -60,7 +60,7 @@ version, and the name is reserved — declaring one fails the stack with
 this: the property is a valid string, so only AWS rejects it, at create time.
 
 ```
-you ──► Harness (agent loop, Nova Pro)
+you ──► Harness (agent loop, Claude Sonnet)
              │  gateway attached as one of its tools
              ▼
         Gateway ──► Dispatcher (REQUEST interceptor) ──► Tier 1 detection
@@ -232,12 +232,27 @@ so that step 3 is not the first thing a new user has to get right.
 stack creates both resources itself.
 
 **Model access must be enabled.** The agent uses a Bedrock model
-(`TestHarnessModelId`, default `us.amazon.nova-pro-v1:0`). If access to it is not
+(`TestHarnessModelId`, default `global.anthropic.claude-sonnet-4-6`, which is
+what AgentCore itself defaults to). If access to it is not
 enabled in this account and region, the harness deploys but fails at invocation.
 
 **What the interceptor sees is tool-call arguments**, not a user's chat with an
 agent. Vardøger attaches to the gateway, so it inspects traffic crossing the
 gateway. A prompt reaches it as `tools/call` → `params.arguments`.
+
+**Avoid the Amazon Nova models here.** Their tool-use reliability is a
+documented AWS limitation, and this harness does nothing but call a tool, so the
+run fails with `modelStreamErrorException ... Model produced invalid sequence as
+part of ToolUse` before the gateway is ever reached — which reads as a broken
+harness rather than a model choice. The mitigations AWS documents (greedy
+decoding, higher max tokens) are not reachable from CloudFormation:
+`bedrockModelConfig` accepts only `modelId`, `apiFormat` and `additionalParams`.
+
+**The gateway renames tools.** A target named `vardoger-echo` exposing a tool
+named `echo` is advertised to the model as **`vardoger-echo___echo`** —
+`<targetName>___<toolName>`. The AWS console does not show this anywhere; an MCP
+`tools/list` call is the authority. Use the full name in the Test Console's tool
+name field.
 
 ## Teardown
 

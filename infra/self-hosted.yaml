@@ -11,11 +11,15 @@ Parameters:
       means nothing is monitored.
   TestHarnessModelId:
     Type: String
-    Default: "us.amazon.nova-pro-v1:0"
+    Default: "global.anthropic.claude-sonnet-4-6"
     Description: >
       Bedrock model the test harness agent uses. Only read when
       DeployTestHarness=true. Model access must be enabled in this account and
-      region, or the harness will fail to invoke.
+      region, or the harness will fail to invoke. This is the model AgentCore
+      itself defaults to. Avoid the Amazon Nova models here: their tool-use
+      reliability is a documented limitation, and this harness does nothing BUT
+      call a tool, so a Nova default fails with "Model produced invalid sequence
+      as part of ToolUse" before the gateway is ever exercised.
   DeployTestHarness:
     Type: String
     Default: "false"
@@ -1892,9 +1896,14 @@ Resources:
           ModelId: !Ref TestHarnessModelId
       SystemPrompt:
         - Text: >-
-            You are a test assistant for evaluating a security monitor. When the
-            user asks anything, call the echo tool with their message as the
-            prompt argument, then report what it returned.
+            You are a test assistant for evaluating a security monitor. When
+            the user asks anything, call your available echo tool, passing their
+            message verbatim as the prompt argument, then report what it
+            returned. Do not answer from your own knowledge: routing through the
+            tool is the entire point, because that is the hop the monitor
+            inspects. The tool's real name is assigned by the gateway and is not
+            simply "echo", so use whichever echo tool you are given rather than
+            assuming a name.
       Tools:
         # This is the toggle the Harness playground shows under "Tools". Making
         # it declarative is what guarantees the agent actually routes through

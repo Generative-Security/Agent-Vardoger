@@ -344,3 +344,63 @@ class TestHarnessRoleHasWhatAgentCoreNeeds:
         assert f"memory/{harness}-*" in resource, (
             f"memory grant {resource!r} does not cover the harness {harness!r}"
         )
+
+
+class TestTheModelCanActuallyCallTools:
+    """The harness does nothing but call a tool, so tool-use reliability is
+    not a nice-to-have — it is the whole function.
+
+    Amazon Nova's tool-use reliability is a documented AWS limitation, with its
+    own troubleshooting page. With a Nova default the playground failed as:
+
+        modelStreamErrorException ... Model produced invalid sequence as part
+        of ToolUse
+
+    before the gateway was reached, so the monitor under test was never
+    exercised. The mitigations AWS documents (greedy decoding, higher max
+    tokens) are not reachable here: bedrockModelConfig exposes only modelId,
+    apiFormat and additionalParams — temperature and maxTokens are fields of
+    liteLlmModelConfig, not this one.
+
+    The model stays a parameter, so an operator can still choose Nova
+    deliberately. This only governs what ships as the default.
+    """
+
+    UNRELIABLE_FOR_TOOL_USE = ("nova",)
+
+    def test_the_default_model_is_not_one_with_known_tool_use_problems(
+        self, template: dict
+    ) -> None:
+        model = template["Parameters"]["TestHarnessModelId"]["Default"].lower()
+        bad = [name for name in self.UNRELIABLE_FOR_TOOL_USE if name in model]
+        assert not bad, (
+            f"the default harness model {model!r} is a {bad[0]} model, whose "
+            "tool-use limitations are documented by AWS. This harness exists to "
+            "exercise a tool call, so the model fails before the gateway is "
+            "reached and the failure looks like a harness bug."
+        )
+
+    def test_the_system_prompt_does_not_hardcode_the_tool_name(
+        self, resources: dict
+    ) -> None:
+        """The gateway assigns the real name, as <targetName>___<toolName>.
+
+        Confirmed live: the target named `vardoger-echo` exposing a tool named
+        `echo` is advertised to the model as `vardoger-echo___echo`. A prompt
+        instructing the model to call "the echo tool" invites it to emit a name
+        that does not exist, which is one documented cause of an invalid
+        ToolUse sequence.
+        """
+        prompt = " ".join(
+            block["Text"] for block in
+            resources["TestHarnessAgent"]["Properties"]["SystemPrompt"]
+        )
+        target = resources["TestHarnessTarget"]["Properties"]["Name"]
+        assert f"{target}___" not in prompt, (
+            "the system prompt hardcodes a gateway-assigned tool name, which "
+            "changes if the target is renamed"
+        )
+        assert "real name" in prompt.lower() or "whichever" in prompt.lower(), (
+            "the system prompt should tell the model to use the tool it is "
+            "given rather than assume a name"
+        )
