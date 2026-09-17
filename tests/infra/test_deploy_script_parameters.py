@@ -224,3 +224,34 @@ def test_no_variable_is_expanded_without_being_assigned(script: str) -> None:
         "aborts the deploy. If it is an operator input, add it to "
         "_ENVIRONMENT_INPUTS and document it in the quickstart appendix."
     )
+
+
+class TestTheHarnessSummaryPrintsUsableValues:
+    """deploy.sh's closing summary is what an operator copies from.
+
+    Both values it printed for the test harness were wrong at once: a tool name
+    hardcoded to `echo` when the gateway advertises `vardoger-echo___echo`, and
+    a gateway URL with `/mcp` appended to a value that already ended in `/mcp`,
+    producing `/mcp/mcp`. Neither is caught by anything else — the summary is
+    plain `echo` output, so it cannot drift "loudly".
+    """
+
+    def test_the_tool_name_is_read_from_the_stack_output(self, script: str) -> None:
+        """Not hardcoded — the gateway assigns it, and it changes on rename."""
+        assert "TestHarnessToolName" in script, (
+            "deploy.sh does not read the TestHarnessToolName output, so it is "
+            "printing a literal that cannot track the gateway's actual tool name"
+        )
+        summary = script[script.index("=== Test harness ==="):]
+        assert "with tool name  echo\"" not in summary, (
+            "deploy.sh still prints the bare tool name `echo`, which the gateway "
+            "rejects as unknown"
+        )
+
+    def test_the_gateway_url_does_not_get_a_second_mcp_path(self, script: str) -> None:
+        """TestHarnessGatewayUrl already ends in /mcp."""
+        summary = script[script.index("=== Test harness ==="):]
+        assert "${TH_URL%/}/mcp" not in summary and "$TH_URL/mcp" not in summary, (
+            "deploy.sh appends /mcp to a gateway URL that already ends in /mcp, "
+            "printing a /mcp/mcp endpoint that 404s"
+        )

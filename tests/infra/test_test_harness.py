@@ -466,3 +466,30 @@ class TestThePublishedToolNameIsTheOneTheGatewayAccepts:
             f"docs/test-harness.md never mentions {published!r}, the name the "
             "stack output tells operators to use"
         )
+
+
+class TestTheModelIdIsInvokable:
+    """A Nova model id without an inference-profile prefix is a validation error.
+
+    Nova models are reachable only through a cross-region inference profile, so
+    the bare `amazon.nova-2-lite-v1:0` cannot be invoked. What makes this worth
+    a guard is how it presents: the harness does not fail, it quietly falls back
+    to a different model. Observed live, the fallback was
+    `us.amazon.nova-pro-v1:0` — the first-generation model whose tool-use
+    failures are the reason the default was changed in the first place. So a
+    wrong prefix silently reinstates the bug it was meant to fix.
+    """
+
+    PROFILE_PREFIXES = ("us.", "eu.", "apac.", "global.")
+
+    def test_a_nova_default_carries_an_inference_profile_prefix(
+        self, template: dict
+    ) -> None:
+        model = template["Parameters"]["TestHarnessModelId"]["Default"]
+        if "nova" not in model.lower():
+            pytest.skip("guard applies to Nova ids, which require a profile")
+        assert model.startswith(self.PROFILE_PREFIXES), (
+            f"{model!r} has no inference-profile prefix, so it is not invokable. "
+            f"Expected one of {self.PROFILE_PREFIXES}. The harness will fall back "
+            "to another model rather than reporting the error."
+        )

@@ -11,17 +11,21 @@ Parameters:
       means nothing is monitored.
   TestHarnessModelId:
     Type: String
-    Default: "amazon.nova-2-lite-v1:0"
+    Default: "global.amazon.nova-2-lite-v1:0"
     Description: >
       Bedrock model the test harness agent uses. Only read when
-      DeployTestHarness=true. Model access must be enabled in this account and
-      region, or the harness will fail to invoke. Chosen because it needs no model-access
-      request, which removes a setup step for the operator. Avoid the FIRST-generation Nova models here
-      (nova-pro-v1, nova-lite-v1, nova-micro-v1): their tool-use reliability is
-      a documented limitation, and this harness does nothing BUT call a tool, so
-      they fail with "Model produced invalid sequence as part of ToolUse" before
-      the gateway is ever exercised. Later Nova generations are fine — Nova 2
-      Lite has been verified working on this harness.
+      DeployTestHarness=true. Chosen because it needs no model-access request,
+      which removes a setup step for the operator.
+      NOTE the "global." prefix. Nova models are reachable only through a
+      cross-region inference profile; the bare id (amazon.nova-2-lite-v1:0) is a
+      validation error, and the harness reports it by quietly falling back to
+      another model rather than failing, so a wrong id here looks like the
+      setting being ignored.
+      Avoid the FIRST-generation Nova models (nova-pro-v1, nova-lite-v1,
+      nova-micro-v1): their tool-use reliability is a documented limitation, and
+      this harness does nothing BUT call a tool, so they fail with "Model
+      produced invalid sequence as part of ToolUse" before the gateway is ever
+      exercised. Later generations are fine - Nova 2 Lite is verified working.
   DeployTestHarness:
     Type: String
     Default: "false"
@@ -2084,7 +2088,9 @@ Outputs:
 
   TestHarnessGatewayUrl:
     Condition: DeployTestHarness
-    Description: MCP endpoint of the test gateway. Append /mcp in the Test Console.
+    Description: >
+      MCP endpoint of the test gateway. Already ends in /mcp - paste it into
+      the Test Console as-is.
     Value: !GetAtt TestHarnessGateway.GatewayUrl
 
   TestHarnessGatewayArn:

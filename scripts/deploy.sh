@@ -484,7 +484,9 @@ if [ "$NEW_HARNESS" = "true" ]; then
     echo "REQUEST interceptor - no manual wiring needed."
     echo ""
     echo "  Gateway URL:  ${TH_URL}"
-    echo "  Test Console: paste ${TH_URL%/}/mcp  with tool name  echo"
+    TH_TOOL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`TestHarnessToolName`].OutputValue' --output text 2>/dev/null || true)
+    echo "  Test Console: paste ${TH_URL}  with tool name  ${TH_TOOL}"
     echo ""
     echo "  Get a bearer token for the Test Console:"
     echo ""
