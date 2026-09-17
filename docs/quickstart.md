@@ -126,11 +126,28 @@ This provisions a Cognito user pool with `viewer` / `operator` / `admin` groups 
 POOL_ID=$(aws cloudformation describe-stacks --stack-name agent-vardoger \
   --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue" --output text)
 
+# 1. Create the account. SUPPRESS skips the invitation email: Cognito's default
+#    sender is rate-limited, and the temporary password it carries expires in
+#    7 days -- the most common way to end up locked out of your own console.
 aws cognito-idp admin-create-user --user-pool-id "$POOL_ID" \
-  --username you@example.com --user-attributes Name=email,Value=you@example.com
+  --username you@example.com \
+  --user-attributes Name=email,Value=you@example.com Name=email_verified,Value=true \
+  --message-action SUPPRESS
+
+# 2. Set a password you choose. Without this the account sits in
+#    FORCE_CHANGE_PASSWORD and cannot sign in at all.
+aws cognito-idp admin-set-user-password --user-pool-id "$POOL_ID" \
+  --username you@example.com --password 'CHOOSE-A-PASSWORD' --permanent
+
+# 3. Grant a role. Role comes from group membership: a user in no group signs
+#    in successfully and sees an empty console, which reads as a broken
+#    dashboard rather than a missing group.
 aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
   --username you@example.com --group-name admin
 ```
+
+All three steps are required. Steps 2 and 3 are the ones people skip, and each
+fails in a way that points somewhere other than the account.
 
 Roles map to access: **viewer** (read-only monitoring), **operator** (adds triage + Test Console), **admin** (adds policy, signatures, subscription, managed-upgrade).
 
