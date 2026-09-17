@@ -245,6 +245,12 @@ class TestBaggageKeysAreVisible:
         with caplog.at_level(self._logging.DEBUG, logger="adapters.agentcore.event_parser"):
             parse_gateway_event(event)
         assert "runtime.session.id" in caplog.text
+        # The values must NOT appear. Baggage is caller-authored, so dumping it
+        # wholesale puts untrusted content — possibly a token someone stuffed
+        # in there — into a log group with a wider audience than the request.
+        assert "=s1" not in caplog.text and "=r1" not in caplog.text, (
+            "baggage VALUES were logged, not just key names"
+        )
 
         caplog.clear()
         with caplog.at_level(self._logging.INFO, logger="adapters.agentcore.event_parser"):
