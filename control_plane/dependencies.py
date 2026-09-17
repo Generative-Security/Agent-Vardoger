@@ -99,8 +99,21 @@ def _role_from_claims(claims: dict) -> str:
     groups = claims.get("cognito:groups")
     group_values: list[str] = []
     if isinstance(groups, str):
-        # Cognito may serialize groups as a comma/space separated string.
-        group_values = [g.strip() for g in groups.replace(",", " ").split() if g.strip()]
+        # The API Gateway HTTP API JWT authorizer flattens claims to strings,
+        # and an ARRAY claim arrives WITH ITS BRACKETS: "[admin]", or
+        # "[admin operator]" for several. Stripping them is not cosmetic --
+        # without it "[admin]" is compared against the role table, never
+        # matches, and the caller is refused every route while Cognito and the
+        # token both say they are an admin.
+        #
+        # Also seen: a plain comma/space separated list, and a JSON array when
+        # the claims come from a decoded token rather than the authorizer.
+        # Treat brackets, quotes, commas and whitespace all as delimiters.
+        group_values = [
+            g.strip().strip('"\'')
+            for g in groups.strip().strip("[]").replace(",", " ").split()
+            if g.strip().strip('"\'')
+        ]
     elif isinstance(groups, (list, tuple, set)):
         group_values = [str(g).strip() for g in groups]
     for group in group_values:
