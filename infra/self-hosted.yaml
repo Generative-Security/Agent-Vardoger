@@ -1587,13 +1587,40 @@ Resources:
       Principal: "*"
       FunctionUrlAuthType: NONE
 
+  # A public Function URL needs BOTH permissions, and both must be conditioned.
+  #
+  # Function URLs created since October 2025 require lambda:InvokeFunctionUrl in
+  # addition to lambda:InvokeFunction. This template granted only the latter, so
+  # the URL answers 403 -- and AuthMode=token, the DEFAULT, is served entirely
+  # over that URL.
+  #
+  # The conditions are what keep "Principal: *" honest. A public URL genuinely
+  # requires a wildcard principal; what must not be wildcarded is HOW the
+  # function may be reached. Without them, an unconditioned InvokeFunction grant
+  # to "*" lets any AWS principal invoke the control plane DIRECTLY, bypassing
+  # the URL entirely. The app still demands its bearer token, but the invoke
+  # surface has no business being open.
   ControlPlaneUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: UsesFunctionUrl
+    Properties:
+      FunctionName: !Ref ControlPlaneFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      # Only while the URL is actually public. If AuthType is ever changed to
+      # AWS_IAM this grant stops applying rather than silently staying open.
+      FunctionUrlAuthType: NONE
+
+  ControlPlaneUrlInvokeFunctionPermission:
     Type: AWS::Lambda::Permission
     Condition: UsesFunctionUrl
     Properties:
       FunctionName: !Ref ControlPlaneFunction
       Action: lambda:InvokeFunction
       Principal: "*"
+      # Restricts this grant to calls arriving THROUGH the function URL. This is
+      # the condition that stops "*" meaning "anyone, by any route".
+      InvokedViaFunctionUrl: true
 
   # ===========================================================================
   # Optional test harness (DeployTestHarness=true)

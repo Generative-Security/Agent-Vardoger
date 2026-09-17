@@ -337,3 +337,86 @@ class TestHealthIsReachableWithoutCredentials:
             "control_plane/main.py). Two layers duplicate the header and the "
             "browser rejects the response."
         )
+
+
+class TestThePublicFunctionUrlGrantIsBounded:
+    """`Principal: "*"` is unavoidable here. Unconditioned, it is a hole.
+
+    AuthMode=token — the DEFAULT — serves the whole control plane over a public
+    Lambda Function URL, which genuinely requires a wildcard principal. What
+    must not be wildcarded is *how* the function may be reached.
+
+    The template granted a single unconditioned `lambda:InvokeFunction` to `*`,
+    which let any AWS principal invoke the control plane directly, bypassing the
+    URL. The app still demands its bearer token, so this was not an
+    authentication bypass — but the invoke surface had no reason to be open, and
+    IAM Access Analyzer flags exactly this shape.
+
+    It was also incomplete. Function URLs created since October 2025 require
+    BOTH `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, so granting
+    only the latter makes the URL answer 403 — meaning the default auth mode
+    was plausibly broken and, per the test matrix, never exercised.
+    """
+
+    @staticmethod
+    def _url_permissions(resources: dict) -> list[dict]:
+        return [
+            body["Properties"]
+            for body in resources.values()
+            if body.get("Type") == "AWS::Lambda::Permission"
+            and body.get("Condition") == "UsesFunctionUrl"
+        ]
+
+    def test_both_required_actions_are_granted(self, resources: dict) -> None:
+        actions = {p.get("Action") for p in self._url_permissions(resources)}
+        assert actions == {"lambda:InvokeFunctionUrl", "lambda:InvokeFunction"}, (
+            f"function URL grants {sorted(actions)}. Since October 2025 a URL "
+            "needs both actions; with one, the URL returns 403 and token mode "
+            "does not work at all."
+        )
+
+    def test_every_wildcard_grant_is_conditioned(self, resources: dict) -> None:
+        """This is the whole point: bound the route, not the principal."""
+        unbounded = [
+            p.get("Action") for p in self._url_permissions(resources)
+            if p.get("Principal") == "*"
+            and "FunctionUrlAuthType" not in p
+            and "InvokedViaFunctionUrl" not in p
+        ]
+        assert not unbounded, (
+            f"unconditioned wildcard grants: {unbounded}. Any AWS principal "
+            "could invoke the control plane directly, not only through the URL."
+        )
+
+    def test_the_url_grant_only_applies_while_the_url_is_public(
+        self, resources: dict
+    ) -> None:
+        """Scoped to AuthType NONE, so switching the URL to AWS_IAM retires this
+        grant instead of leaving it silently open."""
+        url_grant = next(
+            p for p in self._url_permissions(resources)
+            if p.get("Action") == "lambda:InvokeFunctionUrl"
+        )
+        assert url_grant.get("FunctionUrlAuthType") == "NONE"
+
+    def test_the_invoke_grant_is_restricted_to_url_calls(self, resources: dict) -> None:
+        invoke_grant = next(
+            p for p in self._url_permissions(resources)
+            if p.get("Action") == "lambda:InvokeFunction"
+        )
+        assert invoke_grant.get("InvokedViaFunctionUrl") is True, (
+            "lambda:InvokeFunction is granted to * without InvokedViaFunctionUrl, "
+            "so it permits direct invocation by any principal"
+        )
+
+    def test_these_grants_exist_only_in_function_url_modes(self, resources: dict) -> None:
+        """In cognito mode there is no public URL, so no public grant."""
+        for logical_id, body in resources.items():
+            if body.get("Type") != "AWS::Lambda::Permission":
+                continue
+            if body.get("Properties", {}).get("Principal") != "*":
+                continue
+            assert body.get("Condition") == "UsesFunctionUrl", (
+                f"{logical_id} grants a wildcard principal outside the "
+                "function-URL modes that require one"
+            )
