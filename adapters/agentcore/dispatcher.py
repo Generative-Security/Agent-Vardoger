@@ -262,7 +262,26 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "Dispatcher requires an AgentCore interceptor event with an 'mcp' or 'http' envelope"
         )
 
-    parsed = parse_gateway_event(event)
+    try:
+        parsed = parse_gateway_event(event)
+    except Exception as exc:
+        # Parsing is not detection, but failing it has the same consequence:
+        # the prompt was never judged. Left unhandled this escapes as a Lambda
+        # error and the gateway returns 500 to the CALLER, so a parser bug
+        # takes the agent down with it — precisely what fail-open exists to
+        # prevent. Governed by the same policy as a detection failure.
+        logger.exception(
+            "Could not parse the interceptor event; policy=%s",
+            config.DETECTION_FAILURE_POLICY,
+        )
+        report_degraded(
+            INLINE_DETECTION,
+            f"event parse failed: {type(exc).__name__}",
+            policy=config.DETECTION_FAILURE_POLICY,
+        )
+        if config.DETECTION_FAILURE_POLICY == "fail_closed":
+            return _terminate_response(event)
+        return _passthrough_response(event)
 
     # No inspectable text — protocol control message, pass through
     if not parsed.has_inspectable_text:
