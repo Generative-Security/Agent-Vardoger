@@ -193,7 +193,7 @@ curl -s -X POST "<TestHarnessGatewayUrl>/mcp" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
+  -H "MCP-Protocol-Version: 2025-03-26" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 

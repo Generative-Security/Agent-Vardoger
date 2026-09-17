@@ -44,7 +44,17 @@ _MAX_RESPONSE_BYTES = 1_000_000
 # Check yours with:
 #   aws bedrock-agentcore-control get-gateway --gateway-identifier <id>
 #     --query 'protocolConfiguration.mcp.supportedVersions'
-MCP_PROTOCOL_VERSION = os.environ.get("VARDOGER_MCP_PROTOCOL_VERSION", "2025-11-25").strip() or "2025-11-25"
+# The MCP protocol version the gateway will accept is not stable across
+# gateways or over time, and a mismatch is a hard JSON-RPC error rather than a
+# negotiation. Two different hardcoded values have already been wrong against a
+# live gateway. This default is the version AgentCore gateways currently report
+# as supported; _negotiated_version below makes a wrong default self-correcting
+# rather than a support ticket, because the error names what IS supported.
+_DEFAULT_MCP_PROTOCOL_VERSION = "2025-03-26"
+MCP_PROTOCOL_VERSION = (
+    os.environ.get("VARDOGER_MCP_PROTOCOL_VERSION", _DEFAULT_MCP_PROTOCOL_VERSION).strip()
+    or _DEFAULT_MCP_PROTOCOL_VERSION
+)
 
 _DEFAULT_GATEWAY_HOST_RE = re.compile(
     r"^[a-z0-9][a-z0-9-]*\.gateway\.bedrock-agentcore\.[a-z0-9-]+\.amazonaws\.com$"
@@ -198,15 +208,125 @@ def _extract_tool_payload(mcp_response: dict) -> dict:
     return {"status": "error", "response": "Gateway returned an empty result."}
 
 
+def _negotiated_version(mcp_response: dict) -> str:
+    """Return a protocol version the gateway accepts, or "" if not applicable.
+
+    A version mismatch comes back as JSON-RPC -32600 carrying the supported
+    list, so the gateway tells us the answer. Reading it turns a wrong default
+    into one retried round trip instead of an unusable Test Console.
+    """
+    error = mcp_response.get("error")
+    if not isinstance(error, dict):
+        return ""
+    if "unsupported protocol version" not in str(error.get("message", "")).lower():
+        return ""
+    supported = (error.get("data") or {}).get("supported")
+    if not isinstance(supported, list):
+        return ""
+    # Lexicographic max is correct for the YYYY-MM-DD versions MCP uses.
+    versions = sorted(str(v) for v in supported if isinstance(v, str) and v)
+    return versions[-1] if versions else ""
+
+
+def _extract_http_payload(body: str) -> dict:
+    """Pull a displayable answer out of a protocol-less gateway's response.
+
+    Unlike MCP there is no envelope and no agreed schema: the target returns
+    whatever it returns. So this reads the fields agents commonly use and falls
+    back to showing the raw document rather than an empty string — a blank
+    Test Console reply is indistinguishable from a silent failure.
+    """
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return {"status": "success", "response": body}
+    if not isinstance(document, dict):
+        return {"status": "success", "response": json.dumps(document)}
+
+    # A Vardoger block arrives here: {"error": "Session terminated ..."}.
+    error = document.get("error")
+    if error:
+        return {"status": "error", "response": error if isinstance(error, str) else json.dumps(error)}
+
+    for key in ("result", "response", "output", "completion", "text", "message"):
+        value = document.get(key)
+        if isinstance(value, str) and value:
+            return {
+                "status": "success",
+                "response": value,
+                "session_id": document.get("session_id", ""),
+                "model": document.get("model", ""),
+            }
+    return {"status": "success", "response": json.dumps(document)}
+
+
+def _post(url: str, data: bytes, headers: dict[str, str]) -> tuple[str, int, "ChatResponse | None"]:
+    """POST to an already-validated gateway URL.
+
+    Returns (body, http_status, error_response). The third element is non-None
+    when the call could not be completed at all, in which case the caller
+    returns it unchanged. An HTTP error STATUS is not such a case: a Vardoger
+    block arrives as a 403 carrying the refusal we want to display.
+    """
+    http_req = request.Request(url, data=data, method="POST", headers=headers)
+    try:
+        # Use the no-redirect opener so a validated host cannot 3xx to an
+        # internal target after the check.
+        with _opener.open(http_req, timeout=_GATEWAY_TIMEOUT_SECONDS) as resp:
+            raw_bytes = resp.read(_MAX_RESPONSE_BYTES + 1)
+            if len(raw_bytes) > _MAX_RESPONSE_BYTES:
+                return "", 502, ChatResponse(
+                    status="error",
+                    response="Gateway response exceeded the size limit.",
+                    session_id="",  # the caller substitutes the real one
+                    raw={"http_status": 502},
+                )
+            return raw_bytes.decode("utf-8", errors="replace"), getattr(resp, "status", 200), None
+    except GatewayUrlError as exc:
+        # Raised by the no-redirect handler when the gateway attempts a 3xx.
+        logger.warning("Test Console gateway redirect refused: %s", exc)
+        return "", 400, ChatResponse(
+            status="error",
+            response=f"Gateway URL rejected: {exc}",
+            session_id="",  # the caller substitutes the real one
+            raw={"http_status": 400},
+        )
+    except HTTPError as exc:
+        return exc.read().decode("utf-8", errors="replace") or str(exc), exc.code, None
+    except (URLError, TimeoutError, OSError) as exc:
+        logger.warning("Test Console gateway call failed: %s", exc)
+        return "", 502, ChatResponse(
+            status="error",
+            response=f"Gateway connection failed: {exc}",
+            session_id="",  # the caller substitutes the real one
+            raw={"http_status": 502},
+        )
+
+
 def send_message(req: ChatRequest) -> ChatResponse:
-    """Forward a chat message to the configured Bedrock AgentCore gateway."""
-    if not req.gateway_url or not req.tool_name:
+    """Forward a chat message to the configured Bedrock AgentCore gateway.
+
+    Two gateway placements need two different requests, mirroring the two
+    envelopes the interceptor handles:
+
+        tool_name set    MCP ``tools/call`` against an MCP-protocol gateway
+                         sitting BEHIND an agent. That gateway exposes tools.
+        tool_name empty  A plain POST against a protocol-less gateway sitting
+                         IN FRONT of an agent runtime. There is no MCP layer and
+                         no tools at all, so ``tools/list`` returning ``[]`` is
+                         not a misconfiguration on this topology -- it is the
+                         wrong question. The prompt goes to the target path,
+                         conventionally ``/<targetName>/invocations``.
+
+    Requiring a tool name made the second topology untestable from the console.
+    """
+    if not req.gateway_url:
         return ChatResponse(
             status="error",
             response=(
-                "Test Console is not configured. Provide a gateway URL and tool "
-                "name in the console (or set VARDOGER_TEST_CONSOLE_GATEWAY_URL / "
-                "VARDOGER_TEST_CONSOLE_TOOL_NAME)."
+                "Test Console is not configured. Provide a gateway URL in the "
+                "console (or set VARDOGER_TEST_CONSOLE_GATEWAY_URL). A tool name "
+                "is needed only for an MCP-protocol gateway."
             ),
             session_id=req.session_id,
             raw={"http_status": 400},
@@ -225,6 +345,54 @@ def send_message(req: ChatRequest) -> ChatResponse:
             raw={"http_status": 400},
         )
 
+    # AgentCore Gateways enforce their own INBOUND auth (an OAuth bearer token
+    # from the gateway's identity provider, distinct from Vardoger's own auth);
+    # without it an MCP gateway returns -32001 "Missing Bearer token" before the
+    # interceptor even runs. Sent only when present so an open/dev gateway still
+    # works without one. A gateway configured for AWS_IAM inbound auth needs a
+    # SigV4-signed request, which this console does not produce -- use
+    # CUSTOM_JWT on any gateway you intend to drive from here.
+    gateway_token = (req.gateway_token or "").strip()
+
+    if not req.tool_name.strip():
+        return _send_http(req, gateway_token)
+    return _send_mcp(req, gateway_token)
+
+
+def _send_http(req: ChatRequest, gateway_token: str) -> ChatResponse:
+    """Protocol-less gateway in front of a runtime: POST the prompt as-is."""
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if gateway_token:
+        headers["Authorization"] = f"Bearer {gateway_token}"
+    # The gateway forwards this header onward and the interceptor reads it as
+    # the AUTHENTIC session id. Without it every prompt lands on its own derived
+    # session, so session risk never accumulates and a terminated session is
+    # never recognised on the next turn.
+    if req.session_id:
+        headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"] = req.session_id
+
+    data = json.dumps({
+        "prompt": req.prompt,
+        "session_id": req.session_id,
+        "user_id": req.user_id,
+    }).encode("utf-8")
+
+    body, http_status, failure = _post(req.gateway_url, data, headers)
+    if failure is not None:
+        return failure.model_copy(update={"session_id": req.session_id})
+
+    payload = _extract_http_payload(body)
+    return ChatResponse(
+        status=payload.get("status", "success"),
+        response=payload.get("response", ""),
+        session_id=payload.get("session_id") or req.session_id,
+        model=payload.get("model", ""),
+        raw={"http_status": http_status, "body": body},
+    )
+
+
+def _send_mcp(req: ChatRequest, gateway_token: str) -> ChatResponse:
+    """MCP-protocol gateway behind an agent: issue a ``tools/call``."""
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
@@ -244,58 +412,28 @@ def send_message(req: ChatRequest) -> ChatResponse:
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
     }
-    # AgentCore Gateways require an inbound OAuth bearer token; without it the
-    # gateway rejects the MCP call with -32001 "Missing Bearer token". The token
-    # comes from the gateway's own identity provider (not Vardoger's auth) and is
-    # supplied server-side (VARDOGER_TEST_CONSOLE_GATEWAY_TOKEN) or per request.
-    # Sent only when present so an open/dev gateway still works without one.
-    gateway_token = (req.gateway_token or "").strip()
     if gateway_token:
         headers["Authorization"] = f"Bearer {gateway_token}"
-    http_req = request.Request(
-        req.gateway_url,
-        data=data,
-        method="POST",
-        headers=headers,
-    )
-    try:
-        # Use the no-redirect opener so a validated host cannot 3xx to an
-        # internal target after the check.
-        with _opener.open(http_req, timeout=_GATEWAY_TIMEOUT_SECONDS) as resp:
-            raw_bytes = resp.read(_MAX_RESPONSE_BYTES + 1)
-            if len(raw_bytes) > _MAX_RESPONSE_BYTES:
-                return ChatResponse(
-                    status="error",
-                    response="Gateway response exceeded the size limit.",
-                    session_id=req.session_id,
-                    raw={"http_status": 502},
-                )
-            mcp = _parse_mcp_body(raw_bytes.decode("utf-8", errors="replace"))
-    except GatewayUrlError as exc:
-        # Raised by the no-redirect handler when the gateway attempts a 3xx.
-        logger.warning("Test Console gateway redirect refused: %s", exc)
-        return ChatResponse(
-            status="error",
-            response=f"Gateway URL rejected: {exc}",
-            session_id=req.session_id,
-            raw={"http_status": 400},
+
+    body, _status, failure = _post(req.gateway_url, data, headers)
+    if failure is not None:
+        return failure.model_copy(update={"session_id": req.session_id})
+    mcp = _parse_mcp_body(body)
+
+    # The gateway rejects an unsupported protocol version outright, but names
+    # the versions it does accept. Retry once on its terms rather than surfacing
+    # a configuration error the operator cannot act on from the console.
+    agreed = _negotiated_version(mcp)
+    if agreed and agreed != headers["MCP-Protocol-Version"]:
+        logger.info(
+            "Gateway rejected MCP-Protocol-Version %s; retrying with %s",
+            headers["MCP-Protocol-Version"], agreed,
         )
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return ChatResponse(
-            status="error",
-            response=body or str(exc),
-            session_id=req.session_id,
-            raw={"http_status": exc.code},
-        )
-    except (URLError, TimeoutError, OSError) as exc:
-        logger.warning("Test Console gateway call failed: %s", exc)
-        return ChatResponse(
-            status="error",
-            response=f"Gateway connection failed: {exc}",
-            session_id=req.session_id,
-            raw={"http_status": 502},
-        )
+        headers["MCP-Protocol-Version"] = agreed
+        body, _status, failure = _post(req.gateway_url, data, headers)
+        if failure is not None:
+            return failure.model_copy(update={"session_id": req.session_id})
+        mcp = _parse_mcp_body(body)
 
     tool_payload = _extract_tool_payload(mcp)
     return ChatResponse(

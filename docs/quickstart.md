@@ -157,28 +157,45 @@ Then confirm the interceptor is actually evaluating traffic. Either use the **Te
 
 If step 2 is not blocked, the Dispatcher Lambda is likely not attached as a REQUEST interceptor on your gateway (see step 3) — re-check the gateway configuration.
 
-> **Test Console setup.** Two fields trip people up, because both want a value
-> that is *not* the gateway id:
+> **Test Console setup.** Which values you need depends on where the gateway
+> sits, because the two placements speak different protocols:
 >
-> - **Gateway URL** — the MCP endpoint, which ends in **`/mcp`**:
->   `https://<gateway-id>.gateway.bedrock-agentcore.<region>.amazonaws.com/mcp`.
->   **The AWS console lists the gateway URL without that path**, so the value you
->   copy from it is incomplete; posting to the bare host never reaches the MCP
->   handler. The Test Console appends `/mcp` for you when you paste a bare host
->   and shows the URL it will actually post to.
-> - **Tool name** — a tool *on* the gateway, not the gateway itself. Pasting the
->   gateway id here returns `Unknown tool: <id>`.
+> | | Gateway **behind** the agent | Gateway **in front of** the runtime |
+> |---|---|---|
+> | Gateway protocol | MCP | protocol-less (HTTP) |
+> | Gateway URL | `https://<id>.gateway.…amazonaws.com/mcp` | `https://<id>.gateway.…amazonaws.com/<targetName>/invocations` |
+> | Tool name | **required** | **leave empty** |
+> | What the console sends | `tools/call` | a plain `POST` of the prompt |
+> | What Vardøger inspects | the agent's tool-call arguments | the caller's raw prompt |
 >
->   **Ask the gateway for the exact string.** An MCP `tools/list` call returns
->   the names it will accept, verbatim — see
->   [Calling the gateway directly](#calling-the-gateway-directly) below. Do not
->   assemble the name by hand from console fields: how a gateway derives tool
->   names from what is attached to it is an AgentCore detail that varies, and a
->   name that is close but not exact fails the same way as a wrong one.
+> - **Gateway URL.** The AWS console lists a gateway's URL *without* any path, so
+>   the value you copy from it is incomplete either way. For an MCP gateway the
+>   Test Console appends `/mcp` when you paste a bare host. For a protocol-less
+>   one it cannot: the path names a *target*, which the URL does not reveal, so
+>   you supply it. Either way the console shows the URL it will actually post to.
+> - **Tool name.** Fill it in only for an MCP gateway, where it names a tool *on*
+>   the gateway rather than the gateway itself — pasting the gateway id returns
+>   `Unknown tool: <id>`. **Ask the gateway for the exact string**: an MCP
+>   `tools/list` call returns the names it accepts, verbatim (see
+>   [Calling the gateway directly](#calling-the-gateway-directly)). Do not
+>   assemble the name by hand from console fields; how a gateway derives tool
+>   names is an AgentCore detail that varies, and a name that is close but not
+>   exact fails exactly like a wrong one.
 >
->   An empty `{"tools":[]}` means the gateway exposes nothing yet, so no client
->   — including your agent — can call anything through it. If prompts are not
->   reaching Vardøger, check this first.
+>   **Leave it empty for a protocol-less gateway.** That gateway has no MCP layer
+>   and no tools, so there is nothing to name. An empty tool name is what selects
+>   the plain-`POST` mode, and the console says so beneath the field.
+>
+> **`{"tools":[]}` does not always mean something is broken.** On an MCP gateway
+> it does: nothing is exposed, so no client — including your agent — can call
+> anything through it, and that is the first thing to check when prompts are not
+> reaching Vardøger. On a protocol-less gateway it is simply the wrong question;
+> that gateway never advertises tools, and prompts reach Vardøger regardless.
+> Confirm which kind you have before treating an empty list as a fault:
+>
+> ```bash
+> aws bedrock-agentcore-control get-gateway >   --gateway-identifier <gateway-id> --region <region> --query protocolType
+> ```
 >
 > **The console cannot reach an IAM-authorized gateway.** A gateway's inbound
 > auth is either `AWS_IAM` (SigV4) or `CUSTOM_JWT` (OAuth bearer), and the Test
@@ -224,7 +241,7 @@ interceptor your agent does.
 
 ```bash
 pip3 install --user awscurl && export PATH="$HOME/.local/bin:$PATH"
-awscurl --service bedrock-agentcore --region us-east-1   -X POST "https://<gateway-id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"   -H "Content-Type: application/json"   -H "Accept: application/json, text/event-stream"   -H "MCP-Protocol-Version: 2025-11-25"   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+awscurl --service bedrock-agentcore --region us-east-1   -X POST "https://<gateway-id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"   -H "Content-Type: application/json"   -H "Accept: application/json, text/event-stream"   -H "MCP-Protocol-Version: 2025-03-26"   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 **JWT inbound.** Same request with `curl` and
@@ -344,7 +361,7 @@ Set these before deploying; `deploy.sh` forwards them to the stack.
 | Variable | Default | Description |
 |---|---|---|
 | `VARDOGER_TEST_CONSOLE_GATEWAY_TOKEN` | *(none)* | Server-side default for the gateway's inbound OAuth token, so it need not be pasted into the browser. Read by the control plane, not by `deploy.sh`. |
-| `VARDOGER_MCP_PROTOCOL_VERSION` | `2025-11-25` | Protocol version sent as `MCP-Protocol-Version`. A gateway rejects a version outside its own `supportedVersions`; check yours with `get-gateway --query 'protocolConfiguration.mcp.supportedVersions'`. |
+| `VARDOGER_MCP_PROTOCOL_VERSION` | `2025-03-26` | Protocol version sent as `MCP-Protocol-Version`. A gateway rejects a version outside its own `supportedVersions`; check yours with `get-gateway --query 'protocolConfiguration.mcp.supportedVersions'`. |
 
 ### Script behaviour
 

@@ -18,13 +18,20 @@ const DEFAULT_TOOL_NAME = import.meta.env.VITE_TEST_CONSOLE_TOOL_NAME || "";
 // blank and pasted by the operator — the token is not persisted.
 const DEFAULT_GATEWAY_TOKEN = import.meta.env.VITE_TEST_CONSOLE_GATEWAY_TOKEN || "";
 
-// The AWS console lists a gateway's URL WITHOUT the /mcp path, so the value an
-// operator copies from it posts to the bare host and never reaches the MCP
-// handler. Append the path when none was given, and show what will actually be
-// sent rather than silently rewriting the field.
-function mcpEndpoint(raw: string): string {
+// The AWS console lists a gateway's URL WITHOUT a path, so the value an operator
+// copies from it posts to the bare host. Where that path should point depends
+// entirely on where the gateway sits:
+//
+//   MCP gateway, BEHIND an agent   /mcp — one handler for every tool
+//   protocol-less, IN FRONT of one /<targetName>/invocations — per target, so
+//                                  it cannot be guessed from the URL alone
+//
+// So /mcp is appended only in MCP mode. Appending it in the other mode would
+// post to an endpoint that does not exist on that gateway. Either way the
+// effective URL is shown rather than the field being silently rewritten.
+function gatewayEndpoint(raw: string, mcpMode: boolean): string {
   const trimmed = raw.trim();
-  if (!trimmed) return "";
+  if (!trimmed || !mcpMode) return trimmed;
   try {
     const url = new URL(trimmed);
     if (url.pathname === "" || url.pathname === "/") {
@@ -35,6 +42,18 @@ function mcpEndpoint(raw: string): string {
   } catch {
     // Not parseable — leave it alone and let the server report why.
     return trimmed;
+  }
+}
+
+// A bare host in http mode reaches the gateway but no target behind it.
+function looksLikeBareHost(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  try {
+    const path = new URL(trimmed).pathname;
+    return path === "" || path === "/";
+  } catch {
+    return false;
   }
 }
 
@@ -60,8 +79,11 @@ export default function TestConsolePage() {
   const [gatewayToken, setGatewayToken] = useState(DEFAULT_GATEWAY_TOKEN);
   // Shown under the fields so the two values that actually trip people up are
   // visible before a request fails, not after.
-  const effectiveGatewayUrl = mcpEndpoint(gatewayUrl);
+  // An empty tool name selects the http branch, exactly as send_message does.
+  const mcpMode = toolName.trim() !== "";
+  const effectiveGatewayUrl = gatewayEndpoint(gatewayUrl, mcpMode);
   const urlNeedsMcpPath = effectiveGatewayUrl !== gatewayUrl.trim() && effectiveGatewayUrl !== "";
+  const httpUrlMissingTarget = !mcpMode && looksLikeBareHost(gatewayUrl);
   const toolNameLooksLikeGatewayId = (() => {
     const name = toolName.trim();
     if (!name || !effectiveGatewayUrl) return false;
@@ -125,7 +147,7 @@ export default function TestConsolePage() {
       const response = await chatApi.message({
         prompt: text,
         session_id: sessionId,
-        gateway_url: mcpEndpoint(gatewayUrl),
+        gateway_url: gatewayEndpoint(gatewayUrl, mcpMode),
         tool_name: toolName,
         gateway_token: gatewayToken,
       });
@@ -241,18 +263,33 @@ export default function TestConsolePage() {
               )}
             </label>
             <label className="mt-3 block">
-              <span className="text-xs font-semibold text-slate-500">Tool name</span>
+              <span className="text-xs font-semibold text-slate-500">
+                Tool name <span className="font-normal text-slate-400">— optional</span>
+              </span>
               <input
                 value={toolName}
                 onChange={(event) => setToolName(event.target.value)}
-                placeholder="exact name from tools/list"
+                placeholder="leave empty for a gateway in front of a runtime"
                 className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 font-mono text-xs text-slate-700"
               />
               <span className="mt-1 block text-[11px] text-slate-400">
-                A <strong>tool on</strong> the gateway, not the gateway itself. Use the exact string the
-                gateway advertises — an MCP <code>tools/list</code> call returns them verbatim. An empty
-                list means the gateway exposes no tools yet, so nothing can be called through it.
+                Set this only for an <strong>MCP gateway behind an agent</strong>, which exposes tools: use
+                the exact string <code>tools/list</code> returns. <strong>Leave it empty</strong> for a
+                protocol-less gateway <strong>in front of</strong> a runtime — that one has no tools at all,
+                so <code>tools/list</code> returning an empty list there is expected rather than a fault,
+                and the prompt is posted to the target path directly.
               </span>
+              {!mcpMode && (
+                <span className="mt-1 block text-[11px] font-semibold text-sky-700">
+                  Sending as a plain POST — no MCP, no tool call.
+                </span>
+              )}
+              {httpUrlMissingTarget && (
+                <span className="mt-1 block text-[11px] font-semibold text-amber-700">
+                  The gateway URL has no path, so this reaches the gateway but no target behind it. Add the
+                  target path, conventionally /&lt;targetName&gt;/invocations.
+                </span>
+              )}
               {toolNameLooksLikeGatewayId && (
                 <span className="mt-1 block text-[11px] font-semibold text-amber-700">
                   This matches the gateway's own hostname, so it is the gateway id rather than a tool
