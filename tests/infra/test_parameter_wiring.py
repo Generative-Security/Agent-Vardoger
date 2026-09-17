@@ -216,3 +216,81 @@ def test_tier_handlers_read_the_names_the_template_sets(env_read: set[str]) -> N
     assert not unread_by_code, (
         f"no module reads: {unread_by_code} — check for a prefix mismatch"
     )
+
+
+class _RouteLoader(yaml.SafeLoader):
+    """SafeLoader that tolerates CloudFormation's short-form intrinsics."""
+
+
+def _route_intrinsic(loader: _RouteLoader, tag_suffix: str, node: yaml.Node) -> dict:
+    key = "Fn::" + tag_suffix if tag_suffix != "Ref" else "Ref"
+    if isinstance(node, yaml.ScalarNode):
+        return {key: loader.construct_scalar(node)}
+    if isinstance(node, yaml.SequenceNode):
+        return {key: loader.construct_sequence(node, deep=True)}
+    return {key: loader.construct_mapping(node, deep=True)}
+
+
+_RouteLoader.add_multi_constructor("!", _route_intrinsic)
+
+
+@pytest.fixture(scope="module")
+def resources() -> dict:
+    path = Path(__file__).resolve().parents[2] / "infra/self-hosted.yaml"
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=_RouteLoader)["Resources"]
+
+
+class TestHealthIsReachableWithoutCredentials:
+    """The one endpoint that must answer when everything else is broken.
+
+    Every document says /api/health needs no credentials in any mode, and in
+    token/none mode that held: the Function URL has no authorizer and the route
+    declares no auth dependency. In cognito mode the HTTP API's single $default
+    route applied the JWT authorizer to every path, so /api/health returned
+    {"message":"Unauthorized"}.
+
+    That inverts what a health check is for. An operator reaching for it is
+    asking "is the control plane alive?", and got an answer indistinguishable
+    from a broken deployment — while the real cause was an expired browser
+    token. A more specific route overrides $default, so only this path is
+    exempt.
+    """
+
+    @staticmethod
+    def _routes(resources: dict) -> dict[str, dict]:
+        return {
+            body["Properties"]["RouteKey"]: body["Properties"]
+            for body in resources.values()
+            if body.get("Type") == "AWS::ApiGatewayV2::Route"
+        }
+
+    def test_a_dedicated_health_route_exists(self, resources: dict) -> None:
+        routes = self._routes(resources)
+        assert "GET /api/health" in routes, (
+            "no unauthenticated health route; in cognito mode the $default JWT "
+            "authorizer makes /api/health return Unauthorized, so the documented "
+            "liveness check does not work in the mode teams actually deploy"
+        )
+
+    def test_the_health_route_requires_no_authorizer(self, resources: dict) -> None:
+        health = self._routes(resources)["GET /api/health"]
+        assert health.get("AuthorizationType") == "NONE"
+        assert "AuthorizerId" not in health, (
+            "the health route carries an authorizer, so it is not reachable "
+            "without credentials after all"
+        )
+
+    def test_nothing_else_was_exempted(self, resources: dict) -> None:
+        """The exemption must be one path, not a hole in the authorizer.
+
+        Every other route has to keep the JWT authorizer; a second NONE route
+        would be an unauthenticated control-plane API.
+        """
+        unauthenticated = sorted(
+            key for key, props in self._routes(resources).items()
+            if props.get("AuthorizationType") == "NONE"
+        )
+        assert unauthenticated == ["GET /api/health"], (
+            f"routes reachable without credentials: {unauthenticated}. Only the "
+            "health check may be exempt."
+        )

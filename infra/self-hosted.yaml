@@ -1491,6 +1491,26 @@ Resources:
       AuthorizerId: !Ref ControlPlaneJwtAuthorizer
       Target: !Sub "integrations/${ControlPlaneApiIntegration}"
 
+  # /api/health is documented as reachable without credentials in every mode,
+  # and in token/none mode it is: the Function URL has no authorizer and the
+  # route carries no auth dependency. In cognito mode the $default route's JWT
+  # authorizer covered it too, so the ONE endpoint an operator uses to answer
+  # "is the control plane alive?" returned {"message":"Unauthorized"} — which
+  # reads as a broken deployment rather than as a missing token.
+  #
+  # A more specific route wins over $default, so this exempts only this path.
+  # It returns a static status and service name: no account data, no
+  # configuration, nothing an unauthenticated caller could not infer from the
+  # dashboard being reachable at all.
+  ControlPlaneHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: EnableCognito
+    Properties:
+      ApiId: !Ref ControlPlaneHttpApi
+      RouteKey: "GET /api/health"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${ControlPlaneApiIntegration}"
+
   ControlPlaneApiStage:
     Type: AWS::ApiGatewayV2::Stage
     Condition: EnableCognito
