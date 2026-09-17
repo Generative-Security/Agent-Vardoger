@@ -236,7 +236,9 @@ export VARDOGER_NEW_HARNESS=false
 ./scripts/deploy.sh
 ```
 
-removes all ten. Deleting the stack removes them too. Two things to know: the
+removes all ten. Deleting the stack removes them too — but empty the S3
+buckets first, or they survive the delete and collide with the next deploy;
+see [Removing the stack](quickstart.md#removing-the-stack). Two more things: the
 Cognito **domain** is globally unique per account and region, so a redeploy
 shortly after teardown can collide while the old one releases; and the echo
 function's log group persists under the usual CloudWatch retention.

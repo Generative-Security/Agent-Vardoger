@@ -374,6 +374,41 @@ Two things are preserved automatically and should be left unset: the auth secret
 (omitting the override is what keeps it) and the Function URL, CloudFront domain
 and dashboard URL, which do not regenerate.
 
+### Removing the stack
+
+```bash
+aws cloudformation delete-stack --stack-name agent-vardoger
+```
+
+**Empty the S3 buckets first.** CloudFormation cannot delete a bucket that still
+has objects in it, and the stack has two, both named deterministically:
+
+| Bucket | Holds |
+|---|---|
+| `vardoger-evidence-<account>` | Encrypted prompt evidence |
+| `vardoger-ui-<account>-<region>` | The dashboard build |
+
+A delete against a non-empty bucket leaves the *bucket* behind even when the
+rest of the stack goes. Because the names are derived rather than generated, the
+next deploy asks for a name that already exists and the changeset fails during
+`AWS::EarlyValidation::ResourceExistenceCheck` — which reads as a template
+problem rather than as leftover state. Empty them before deleting:
+
+```bash
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=$(aws configure get region)
+aws s3 rm "s3://vardoger-evidence-${ACCOUNT}" --recursive
+aws s3 rm "s3://vardoger-ui-${ACCOUNT}-${REGION}" --recursive
+```
+
+If the stack is already gone and the buckets are not, the same two commands
+followed by `aws s3 rb` on each clears the collision.
+
+A third bucket, `agent-vardoger-<account>-<region>`, holds the packaged Lambda
+code. `deploy.sh` creates it outside CloudFormation, so the stack never touches
+it and re-running the deploy reuses it. Leave it unless you are removing
+Vardøger entirely.
+
 ### Not exposed as variables
 
 These are CloudFormation parameters with no `deploy.sh` variable. Pass them with
