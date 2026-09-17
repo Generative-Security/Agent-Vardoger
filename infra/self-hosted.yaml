@@ -11,12 +11,12 @@ Parameters:
       means nothing is monitored.
   TestHarnessModelId:
     Type: String
-    Default: "global.anthropic.claude-sonnet-4-6"
+    Default: "amazon.nova-2-lite-v1:0"
     Description: >
       Bedrock model the test harness agent uses. Only read when
       DeployTestHarness=true. Model access must be enabled in this account and
-      region, or the harness will fail to invoke. This is the model AgentCore
-      itself defaults to. Avoid the FIRST-generation Nova models here
+      region, or the harness will fail to invoke. Chosen because it needs no model-access
+      request, which removes a setup step for the operator. Avoid the FIRST-generation Nova models here
       (nova-pro-v1, nova-lite-v1, nova-micro-v1): their tool-use reliability is
       a documented limitation, and this harness does nothing BUT call a tool, so
       they fail with "Model produced invalid sequence as part of ToolUse" before

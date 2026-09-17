@@ -232,8 +232,8 @@ so that step 3 is not the first thing a new user has to get right.
 stack creates both resources itself.
 
 **Model access must be enabled.** The agent uses a Bedrock model
-(`TestHarnessModelId`, default `global.anthropic.claude-sonnet-4-6`, which is
-what AgentCore itself defaults to). If access to it is not
+(`TestHarnessModelId`, default `amazon.nova-2-lite-v1:0`, chosen because it
+needs no model-access request). If access to it is not
 enabled in this account and region, the harness deploys but fails at invocation.
 
 **What the interceptor sees is tool-call arguments**, not a user's chat with an
@@ -250,9 +250,10 @@ rather than a model choice. The mitigations AWS documents (greedy decoding,
 higher max tokens) are not reachable from CloudFormation: `bedrockModelConfig`
 accepts only `modelId`, `apiFormat` and `additionalParams`.
 
-Later Nova generations do not have this problem. **Nova 2 Lite has been verified
-working on this harness** and is a cheaper choice than the default if you have
-access to it.
+Later Nova generations do not have this problem. **Nova 2 Lite
+(`amazon.nova-2-lite-v1:0`) is verified working on this harness** and is the
+default. If you prefer a frontier model, `global.anthropic.claude-sonnet-4-6`
+is what AgentCore itself defaults to, but it requires model access.
 
 **The gateway renames tools.** A target named `vardoger-echo` exposing a tool
 named `echo` is advertised to the model as **`vardoger-echo___echo`** —
