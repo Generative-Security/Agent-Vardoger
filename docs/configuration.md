@@ -138,6 +138,39 @@ suddenly shows "Network Error" or "Could not load sources", sign in again
 before suspecting the deployment — and confirm with
 `curl <api-url>/api/health`, which needs no credentials in any mode.
 
+## Locked out of the console
+
+`cognito` mode creates the user pool with `AllowAdminCreateUserOnly: true`, so
+there is no self-service signup and no password-reset email to fall back on. If
+the session expires and nobody remembers the credentials, recovery is a CLI
+operation. The **Sign out** control cannot help here — it only renders once you
+are signed in.
+
+```bash
+POOL_ID=$(aws cloudformation describe-stacks --stack-name agent-vardoger   --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue" --output text)
+aws cognito-idp list-users --user-pool-id "$POOL_ID"   --query "Users[].[Username,UserStatus]" --output text
+```
+
+| `UserStatus` | Meaning | Next step |
+|---|---|---|
+| *(no users)* | Pool recreated and never populated | Create one, as in the quick start |
+| `FORCE_CHANGE_PASSWORD` | Temporary password never used, and it expires (7 days by default) | Set a permanent password |
+| `CONFIRMED` | Account is fine | Set a permanent password |
+
+```bash
+aws cognito-idp admin-set-user-password --user-pool-id "$POOL_ID"   --username you@example.com --password 'CHOOSE-ONE' --permanent
+```
+
+Role comes from **group membership**, so a user in no group has no effective
+role no matter how the password is set. Check it:
+
+```bash
+aws cognito-idp admin-list-groups-for-user --user-pool-id "$POOL_ID"   --username you@example.com --query "Groups[].GroupName" --output text
+```
+
+Note that a re-deploy which changes the user pool replaces its users too, so a
+pool recreated for any reason starts empty.
+
 ## Removing the stack
 
 ```bash
