@@ -133,10 +133,28 @@ unreachable from the browser no matter how it is configured. JWT costs four
 Cognito resources and makes the Test Console work.
 
 **`PassRequestHeaders: true`.** Without it the interceptor receives no request
-headers, so the parser never sees `mcp-session-id` and falls back to a session
-id read from the request body — which is caller-forgeable and recorded as
-`session_id_is_authentic=false`. Session identity drives risk accumulation and
-the session kill, so it is worth having a real one.
+headers at all, so the parser cannot see `mcp-session-id` and falls back to a
+session id read from the request body.
+
+**Even with it, session identity is usually not authentic here.** Measured on a
+live harness run, every evaluated prompt logged
+`authentic_session=False`: the gateway does not forward `mcp-session-id`, so the
+session id comes from `_meta.baggage` in the request body — a value the
+**caller** supplies. Correlation works (a terminated session is recognised on
+the next turn), but it works on the caller's word.
+
+The consequence is worth stating plainly, because it bounds what session-level
+enforcement can promise on this topology: **a caller who changes the baggage
+session id on each prompt gets a fresh session every time**, so risk never
+accumulates across turns and a termination recorded on one prompt is not found
+on the next. Single-prompt signatures are unaffected — those matched correctly
+in the same run — and so is the `derived-` fallback, which is likewise
+per-prompt.
+
+To see what your own gateway forwards, redeploy with
+`VARDOGER_LOG_LEVEL=DEBUG` and look for `Gateway forwarded headers:` in the
+dispatcher log. It prints header *names* only, never values, since those carry
+the inbound bearer token.
 
 **The gateway role is scoped to one function.** The default gateway role AWS
 creates carries `BedrockAgentCoreFullAccess`, which can invoke every Lambda in

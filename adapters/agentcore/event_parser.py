@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from typing import Any
 
 from vardoger import config
 from vardoger.identity import make_source
+
+logger = logging.getLogger(__name__)
 
 # Maximum recursion depth when harvesting strings from a request body. Bounds
 # work done on hostile input; deeper structures are truncated, and truncation
@@ -384,6 +387,13 @@ def parse_gateway_event(event: dict[str, Any]) -> InterceptorEvent:
         # exists for. The configured agent runtime ARN contains the account and
         # is deploy-time config, so it cannot be influenced by a caller.
         account_id = _account_from_arn(config.AGENT_RUNTIME_ARN)
+
+    # Which headers the gateway actually forwards is not documented and varies
+    # by protocol type. NAMES ONLY, never values: these carry bearer tokens.
+    # Reachable with VARDOGER_LOG_LEVEL=DEBUG when session ids come through as
+    # non-authentic and you need to know whether the header arrived at all.
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Gateway forwarded headers: %s", ",".join(sorted(headers_ci)) or "(none)")
 
     asserted_session_id = str(headers_ci.get("mcp-session-id") or "").strip()
     session_id = asserted_session_id

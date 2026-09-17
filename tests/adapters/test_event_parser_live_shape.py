@@ -136,3 +136,59 @@ class TestLiveShapeEndToEnd:
             parsed = parse_gateway_event(_event(body))
             assert not parsed.has_inspectable_text, body.get("method")
             assert parsed.prompt == ""
+
+
+class TestTheHeaderDiagnosticIsSafe:
+    """Diagnosing a non-authentic session means asking what the gateway sent.
+
+    Observed live: every evaluated prompt logged `authentic_session=False`, with
+    session ids arriving via `_meta.baggage` rather than the `mcp-session-id`
+    header — i.e. from a value the CALLER controls. Whether the header was
+    absent or simply named differently is unanswerable without seeing what
+    arrived, so the parser logs the header NAMES at DEBUG.
+
+    Never the values. Gateway headers carry the inbound bearer token, and a log
+    group is readable by anyone with CloudWatch access — a wider audience than
+    the token's own blast radius.
+    """
+
+    import logging as _logging
+
+    def test_header_names_are_logged_at_debug(self, caplog) -> None:
+        from adapters.agentcore.event_parser import parse_gateway_event
+
+        with caplog.at_level(self._logging.DEBUG, logger="adapters.agentcore.event_parser"):
+            parse_gateway_event({"mcp": {"gatewayRequest": {
+                "headers": {"Mcp-Session-Id": "s1", "X-Custom": "v"},
+                "body": {"method": "tools/call",
+                         "params": {"arguments": {"prompt": "hi"}}},
+            }}})
+        assert "mcp-session-id" in caplog.text
+        assert "x-custom" in caplog.text
+
+    def test_header_values_are_never_logged(self, caplog) -> None:
+        """The exact leak this diagnostic must not become."""
+        from adapters.agentcore.event_parser import parse_gateway_event
+
+        secret = "Bearer eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKEN"
+        with caplog.at_level(self._logging.DEBUG, logger="adapters.agentcore.event_parser"):
+            parse_gateway_event({"mcp": {"gatewayRequest": {
+                "headers": {"Authorization": secret, "Mcp-Session-Id": "s1"},
+                "body": {"method": "tools/call",
+                         "params": {"arguments": {"prompt": "hi"}}},
+            }}})
+        assert "SUPERSECRETTOKEN" not in caplog.text
+        assert secret not in caplog.text
+        assert "authorization" in caplog.text, "the name is still useful"
+
+    def test_nothing_is_logged_at_info(self, caplog) -> None:
+        """Per-prompt header dumps do not belong in normal operation."""
+        from adapters.agentcore.event_parser import parse_gateway_event
+
+        with caplog.at_level(self._logging.INFO, logger="adapters.agentcore.event_parser"):
+            parse_gateway_event({"mcp": {"gatewayRequest": {
+                "headers": {"Mcp-Session-Id": "s1"},
+                "body": {"method": "tools/call",
+                         "params": {"arguments": {"prompt": "hi"}}},
+            }}})
+        assert "forwarded headers" not in caplog.text.lower()
