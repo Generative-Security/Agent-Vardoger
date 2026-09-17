@@ -32,8 +32,14 @@ app = FastAPI(title="Agent Vardøger", version="0.1.0")
 #                    carries Access-Control-Allow-Origin TWICE and the browser
 #                    rejects it ("header contains multiple values").
 #
-#   cognito(+idc) -> the API Gateway HTTP API in front of the control plane does
-#                    NOT add CORS, so the app must — CORSMiddleware is enabled.
+#   cognito(+idc) -> the API Gateway HTTP API in front of the control plane is
+#                    deliberately configured WITHOUT CorsConfiguration, so the
+#                    app must add CORS -- CORSMiddleware is enabled. Both layers
+#                    were configured at once for a while, which duplicated
+#                    Access-Control-Allow-Origin and broke the dashboard; the
+#                    template now carries a comment saying why it must not.
+#                    The app also answers CORS preflights, which reach it via an
+#                    OPTIONS route that carries no authorizer.
 #
 # So the app-layer middleware is added only when NOT behind a Function URL.
 if not config.uses_function_url():

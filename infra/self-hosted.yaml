@@ -1453,10 +1453,13 @@ Resources:
     Properties:
       Name: vardoger-control-plane-api
       ProtocolType: HTTP
-      CorsConfiguration:
-        AllowOrigins: !Split [",", !Ref CorsAllowOrigins]
-        AllowMethods: ["*"]
-        AllowHeaders: ["*"]
+      # No CorsConfiguration here, deliberately. The control plane adds
+      # CORSMiddleware whenever it is not behind a Function URL (see
+      # control_plane/main.py), so configuring CORS here too would put
+      # Access-Control-Allow-Origin on every response TWICE and the browser
+      # rejects that with "header contains multiple values". One layer only,
+      # and it is the app's, because the app is also what answers preflights
+      # on the unauthenticated OPTIONS route below.
 
   ControlPlaneJwtAuthorizer:
     Type: AWS::ApiGatewayV2::Authorizer
@@ -1502,6 +1505,24 @@ Resources:
   # It returns a static status and service name: no account data, no
   # configuration, nothing an unauthenticated caller could not infer from the
   # dashboard being reachable at all.
+  # A CORS preflight carries no Authorization header -- by design, the browser
+  # sends it before it will send credentials. Matched by $default, it therefore
+  # met the JWT authorizer and came back 401, and a preflight that is not 2xx
+  # fails the whole request. The dashboard showed "Network Error" for every
+  # authenticated call while the API itself was healthy.
+  #
+  # A more specific route wins over $default, so preflights land here with no
+  # authorizer and reach the app, where CORSMiddleware answers them. This route
+  # accepts only OPTIONS, which carries no body and triggers no action.
+  ControlPlanePreflightRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: EnableCognito
+    Properties:
+      ApiId: !Ref ControlPlaneHttpApi
+      RouteKey: "OPTIONS /{proxy+}"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${ControlPlaneApiIntegration}"
+
   ControlPlaneHealthRoute:
     Type: AWS::ApiGatewayV2::Route
     Condition: EnableCognito

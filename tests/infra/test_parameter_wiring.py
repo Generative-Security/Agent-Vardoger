@@ -280,17 +280,60 @@ class TestHealthIsReachableWithoutCredentials:
             "without credentials after all"
         )
 
-    def test_nothing_else_was_exempted(self, resources: dict) -> None:
-        """The exemption must be one path, not a hole in the authorizer.
+    def test_only_these_two_routes_are_exempt(self, resources: dict) -> None:
+        """Exemptions must be an explicit list, not a hole in the authorizer.
 
-        Every other route has to keep the JWT authorizer; a second NONE route
-        would be an unauthenticated control-plane API.
+        Two are justified, and nothing else is:
+
+        GET /api/health     a static status string. Documented as needing no
+                            credentials in every mode, and useless if it needs
+                            them, since it is what you reach for when auth is
+                            what is broken.
+
+        OPTIONS /{proxy+}   a CORS preflight, which carries no Authorization
+                            header by design and so can never satisfy the
+                            authorizer. It carries no body and triggers no
+                            action: the browser sends it to ask whether the
+                            REAL request is permitted, and that real request
+                            still meets the authorizer on $default. Without
+                            this the preflight returned 401 and every
+                            authenticated call failed as a network error.
+
+        A third entry here would be an unauthenticated control-plane API, so
+        this asserts the exact set rather than a minimum.
         """
         unauthenticated = sorted(
             key for key, props in self._routes(resources).items()
             if props.get("AuthorizationType") == "NONE"
         )
-        assert unauthenticated == ["GET /api/health"], (
+        assert unauthenticated == ["GET /api/health", "OPTIONS /{proxy+}"], (
             f"routes reachable without credentials: {unauthenticated}. Only the "
-            "health check may be exempt."
+            "health check and the CORS preflight may be exempt."
+        )
+
+    def test_the_preflight_route_accepts_only_options(self, resources: dict) -> None:
+        """An exemption on a method that can change state would be a hole."""
+        for key, props in self._routes(resources).items():
+            if props.get("AuthorizationType") != "NONE":
+                continue
+            method = key.split(" ", 1)[0]
+            assert method in ("GET", "OPTIONS"), (
+                f"route {key!r} is unauthenticated with method {method!r}, which "
+                "can carry a body and change state"
+            )
+
+    def test_cors_is_configured_in_exactly_one_layer(self, resources: dict) -> None:
+        """Both layers at once duplicates Access-Control-Allow-Origin.
+
+        The app adds CORSMiddleware whenever it is not behind a Function URL.
+        Configuring CorsConfiguration on the HTTP API as well put the header on
+        every response twice, which the browser rejects with "header contains
+        multiple values" — the same symptom as the 401 preflight, from a
+        different cause, which is what made it hard to see.
+        """
+        api = resources["ControlPlaneHttpApi"]["Properties"]
+        assert "CorsConfiguration" not in api, (
+            "the HTTP API configures CORS, and so does the app (see "
+            "control_plane/main.py). Two layers duplicate the header and the "
+            "browser rejects the response."
         )
