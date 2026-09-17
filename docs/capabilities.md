@@ -88,7 +88,7 @@ also refused.
 | `Tier1Mode` | Triggering prompt | Session marked terminated | Runtime kill |
 |---|---|---|---|
 | `sidecar` (default) | passed through and answered | immediately | deferred to the alert queue |
-| `gate` | refused, HTTP 403 | immediately | inline |
+| `gate` | refused (JSON-RPC error on MCP, HTTP 403 on plain HTTP) | immediately | inline |
 
 Sidecar is the default so that every tier converges on one lever — terminate the
 session — rather than Tier 1 alone owning a second one. A security component

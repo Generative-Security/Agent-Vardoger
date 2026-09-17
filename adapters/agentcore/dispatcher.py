@@ -127,11 +127,19 @@ def _terminate_response(event: dict[str, Any]) -> dict[str, Any]:
 
     request_body = _gateway_request(event, "mcp").get("body", {})
     request_id = request_body.get("id", "unknown") if isinstance(request_body, dict) else "unknown"
+    # HTTP 200 with a JSON-RPC error, NOT 403. In JSON-RPC an application-level
+    # refusal belongs in the envelope; a non-2xx status is a TRANSPORT failure.
+    # Observed live: an MCP client given 403 retried the tool call and then
+    # stalled, so the agent hung instead of reporting the refusal. A plain
+    # JSON-RPC client over the same gateway displayed the message correctly.
+    #
+    # The prompt is refused either way — only the transport status changes. The
+    # http envelope above keeps 403, which is right for a plain HTTP caller.
     return {
         "interceptorOutputVersion": "1.0",
         "mcp": {
             "transformedGatewayResponse": {
-                "statusCode": 403,
+                "statusCode": 200,
                 "body": {
                     "jsonrpc": "2.0",
                     "id": request_id,

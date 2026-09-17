@@ -203,7 +203,24 @@ def _extract_tool_payload(mcp_response: dict) -> dict:
             return {"status": "success", "response": text}
         # A tool may return a bare JSON string or list; only a dict can carry
         # our status/response contract.
-        return parsed if isinstance(parsed, dict) else {"status": "success", "response": text}
+        if not isinstance(parsed, dict):
+            return {"status": "success", "response": text}
+        # ...and a dict only carries it if it actually has "response". The echo
+        # target returns {"result": "echo: ..."}, which was passed back verbatim;
+        # the caller then read a missing "response" key as "" with status
+        # defaulting to "success", so a working tool call rendered as an empty
+        # box. Same defect shape this function was written to fix, one level in.
+        if "response" in parsed:
+            return parsed
+        for key in ("result", "output", "completion", "text", "message"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value:
+                return {"status": parsed.get("status", "success"), "response": value,
+                        "session_id": parsed.get("session_id", ""),
+                        "model": parsed.get("model", "")}
+        # Unrecognised shape: show the document rather than nothing. A blank
+        # reply is indistinguishable from a silent failure.
+        return {"status": "success", "response": text}
 
     # MCP signals a tool-level failure with isError on the result itself.
     if result.get("isError"):

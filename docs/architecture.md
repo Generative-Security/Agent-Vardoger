@@ -56,7 +56,7 @@ prompt depends on `Tier1Mode`:
   rather than a second one of its own (refuse the call), so a detection
   component cannot take the agent offline. The triggering prompt may be
   answered; the next one is refused.
-- **`gate`** — the prompt is additionally refused with HTTP 403. Choose this
+- **`gate`** — the prompt is additionally refused. Choose this
   when a single successful malicious prompt is unacceptable on its own, such as
   one-shot data exfiltration.
 

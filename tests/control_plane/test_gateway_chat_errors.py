@@ -15,6 +15,8 @@ This is the same defect shape as the green-bordered error box and the
 """
 from __future__ import annotations
 
+import json
+
 from control_plane.services.gateway_chat import _extract_tool_payload
 
 
@@ -105,3 +107,57 @@ class TestSuccessStillWorks:
                                    {"type": "text", "text": "after the image"}]},
         })
         assert payload["response"] == "after the image"
+
+
+class TestAToolWithItsOwnSchemaIsNotRenderedBlank:
+    """A tool returns whatever it returns; it owes us no {status,response}.
+
+    The echo target returns ``{"result": "echo: ..."}``. That parsed cleanly as
+    a dict, so it was handed back verbatim as the payload — and the caller then
+    read a missing ``response`` key as ``""`` with ``status`` defaulting to
+    "success". A working tool call rendered as an empty box in the Test
+    Console, while a BLOCKED prompt displayed its reason correctly.
+
+    That asymmetry is the tell: the failure path was fine and the success path
+    was silent. Same defect shape this module already guards one level up.
+    """
+
+    def _text(self, payload: dict) -> dict:
+        return _extract_tool_payload(
+            {"jsonrpc": "2.0", "id": 1,
+             "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}
+        )
+
+    def test_the_echo_targets_own_shape_is_displayed(self):
+        """Verbatim from the shipped test harness echo Lambda."""
+        payload = self._text({"result": "echo: {\"prompt\": \"hello\"}"})
+        assert payload["response"], "a successful tool call rendered as nothing"
+        assert "hello" in payload["response"]
+        assert _status(payload) == "success"
+
+    def test_our_own_contract_still_wins_when_present(self):
+        payload = self._text({"status": "success", "response": "the answer",
+                              "session_id": "s1", "model": "m"})
+        assert payload["response"] == "the answer"
+        assert payload["session_id"] == "s1"
+
+    def test_an_error_status_from_the_tool_is_preserved(self):
+        """A tool reporting its own failure must not read as success."""
+        payload = self._text({"status": "error", "result": "it broke"})
+        assert _status(payload) == "error"
+
+    def test_other_common_answer_fields_are_read(self):
+        for key in ("result", "output", "completion", "text", "message"):
+            payload = self._text({key: "the answer"})
+            assert payload["response"] == "the answer", key
+
+    def test_an_unrecognised_shape_shows_the_document_rather_than_nothing(self):
+        """Blank is indistinguishable from a silent failure; raw JSON is not."""
+        payload = self._text({"totally": {"unexpected": 1}})
+        assert "unexpected" in payload["response"]
+
+    def test_plain_text_is_unaffected(self):
+        payload = _extract_tool_payload(
+            {"result": {"content": [{"type": "text", "text": "just words"}]}}
+        )
+        assert payload["response"] == "just words"

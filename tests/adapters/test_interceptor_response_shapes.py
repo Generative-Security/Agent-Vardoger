@@ -87,9 +87,30 @@ class TestMcpPathIsUnchanged:
     def test_block_echoes_the_jsonrpc_request_id(self) -> None:
         """A JSON-RPC client correlates the error by id."""
         response = _terminate_response(_mcp_event(42))["mcp"]["transformedGatewayResponse"]
-        assert response["statusCode"] == 403
         assert response["body"]["id"] == 42
         assert response["body"]["error"]["code"] == -32600
+
+
+class TestTheBlockStatusDiffersByEnvelope:
+    """Deliberately different, for a reason found live.
+
+    mcp   HTTP 200 + a JSON-RPC error. An MCP client given a non-2xx treats the
+          refusal as a TRANSPORT failure: it retried the tool call and then
+          stalled, so the agent hung instead of reporting the block.
+    http  HTTP 403. A plain caller has no envelope to carry the error, so the
+          status is the refusal.
+
+    The prompt is refused in both cases; only how the caller is told differs.
+    """
+
+    def test_mcp_uses_200_so_a_client_does_not_hang(self) -> None:
+        response = _terminate_response(_mcp_event())["mcp"]["transformedGatewayResponse"]
+        assert response["statusCode"] == 200
+        assert response["body"]["error"]["code"] == -32600
+
+    def test_http_still_uses_403(self) -> None:
+        response = _terminate_response(_http_event())["http"]["transformedGatewayResponse"]
+        assert response["statusCode"] == 403
 
 
 class TestUnknownEnvelope:

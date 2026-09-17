@@ -61,12 +61,19 @@ class TestAParseFailureDoesNotEscape:
     @pytest.mark.parametrize("event", [_mcp_event(), _http_event()],
                              ids=["mcp", "http"])
     def test_fail_closed_refuses_rather_than_raising(self, event, monkeypatch) -> None:
-        """Still a REFUSAL, which is a 403 — not an unhandled 500."""
+        """Still a REFUSAL the caller can read — not an unhandled 500.
+
+        Carried differently per envelope: a JSON-RPC error for mcp (HTTP 200,
+        because a non-2xx makes an MCP client retry and hang), HTTP 403 for a
+        plain http caller with no envelope to carry it.
+        """
         monkeypatch.setattr(config, "DETECTION_FAILURE_POLICY", "fail_closed")
         with patch.object(dispatcher, "parse_gateway_event", _exploding_parse):
             response = dispatcher.lambda_handler(event, None)
-        envelope = next(v for k, v in response.items() if k in ("mcp", "http"))
-        assert envelope["transformedGatewayResponse"]["statusCode"] == 403
+        if "mcp" in response:
+            assert response["mcp"]["transformedGatewayResponse"]["body"]["error"]["code"] == -32600
+        else:
+            assert response["http"]["transformedGatewayResponse"]["statusCode"] == 403
 
     def test_the_failure_is_recorded_as_degraded(self, monkeypatch) -> None:
         """Silent fail-open is indistinguishable from a clean prompt.
