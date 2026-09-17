@@ -2076,9 +2076,12 @@ Outputs:
   TestHarnessToolName:
     Condition: DeployTestHarness
     Description: >
-      Tool name to enter in the Test Console. Confirm with an MCP tools/list
-      call; the gateway is the authority on the exact string.
-    Value: echo
+      Tool name to enter in the Test Console. The gateway does NOT advertise a
+      tool under the bare name declared in the target's ToolSchema: it prefixes
+      the target name, as <targetName>___<toolName>. This output previously
+      published the bare "echo", which the gateway rejects as an unknown tool.
+      Confirm with an MCP tools/list call, which remains the authority.
+    Value: vardoger-echo___echo
 
   TestHarnessTokenEndpoint:
     Condition: DeployTestHarness

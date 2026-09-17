@@ -404,3 +404,55 @@ class TestTheModelCanActuallyCallTools:
             "the system prompt should tell the model to use the tool it is "
             "given rather than assume a name"
         )
+
+
+class TestThePublishedToolNameIsTheOneTheGatewayAccepts:
+    """The output is copied straight into the Test Console, so it must be exact.
+
+    The gateway does not advertise the bare name declared in the target's
+    ToolSchema. It prefixes the target name:
+
+        target `vardoger-echo` + tool `echo`  ->  `vardoger-echo___echo`
+
+    Confirmed live from the harness playground's own trace. The output
+    published the bare `echo`, so an operator following the stack outputs got
+    an unknown-tool failure and no indication that the name was the problem.
+
+    Derived from the template here rather than hardcoded, so renaming the
+    target or the tool either propagates or fails loudly.
+    """
+
+    SEPARATOR = "___"
+
+    @staticmethod
+    def _expected(resources: dict) -> str:
+        target = resources["TestHarnessTarget"]["Properties"]
+        tool = target["TargetConfiguration"]["Mcp"]["Lambda"]["ToolSchema"][
+            "InlinePayload"
+        ][0]["Name"]
+        return f"{target['Name']}{TestThePublishedToolNameIsTheOneTheGatewayAccepts.SEPARATOR}{tool}"
+
+    def test_the_output_is_target_then_tool(self, template: dict, resources: dict) -> None:
+        published = template["Outputs"]["TestHarnessToolName"]["Value"]
+        assert published == self._expected(resources), (
+            f"stack output publishes {published!r} but the gateway advertises "
+            f"{self._expected(resources)!r}. An operator pasting the output into "
+            "the Test Console gets an unknown-tool error."
+        )
+
+    def test_the_bare_tool_name_is_not_published_alone(self, template: dict) -> None:
+        """The exact regression: `echo` on its own is rejected by the gateway."""
+        published = template["Outputs"]["TestHarnessToolName"]["Value"]
+        assert self.SEPARATOR in str(published), (
+            f"{published!r} has no {self.SEPARATOR!r} prefix, so it is the bare "
+            "ToolSchema name rather than the name the gateway exposes"
+        )
+
+    def test_the_docs_give_the_same_name_as_the_output(self, template: dict) -> None:
+        """Two sources for one exact string; they drift silently otherwise."""
+        published = template["Outputs"]["TestHarnessToolName"]["Value"]
+        doc = (ROOT / "docs/test-harness.md").read_text(encoding="utf-8")
+        assert f"`{published}`" in doc, (
+            f"docs/test-harness.md never mentions {published!r}, the name the "
+            "stack output tells operators to use"
+        )
