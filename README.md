@@ -16,6 +16,8 @@ Agent Vardøger detects prompt injection, jailbreaks, credential theft, social e
 
 Each tier is ordered by the evidence it needs: Tier 1 acts instantly on cheap certainty, Tier 3 waits for a pattern no single session could reveal. Full detail, measured latencies, and failure behaviour in **[docs/capabilities.md](docs/capabilities.md)**.
 
+> **One limitation worth knowing up front:** AgentCore does not permit stopping a session on a **harness-managed** runtime, and publishes no harness equivalent of the API. On those, Vardøger still detects, still accumulates session risk, and still refuses further prompts through the gateway — but the runtime keeps running, so containment is tool denial rather than session termination. Self-managed runtimes, the production shape, are unaffected. See [where the runtime kill does not apply](docs/capabilities.md#where-the-runtime-kill-does-not-apply).
+
 ## The Scope and Source Model
 
 Agent Vardøger separates identity into two independent axes (see [DESIGN-DECISIONS.md](DESIGN-DECISIONS.md) for the full rationale):

@@ -68,6 +68,35 @@ registry write is what closes the door.
 That is why deferring is safe: the window it opens is "the agent finishes
 answering one prompt", not "the attacker gets another turn".
 
+### Where the runtime kill does not apply
+
+**`StopRuntimeSession` does not work on a harness-managed runtime.** AgentCore
+refuses it:
+
+```
+ValidationException: The agent runtime arn:...:runtime/harness_... is managed
+by a harness and cannot be invoked directly
+```
+
+This is a limitation of AgentCore, not of Vardøger, and there is currently no
+harness equivalent of the API. Until AWS publishes one, an agent deployed
+through an AgentCore **Harness** cannot have its runtime stopped by anything —
+including us.
+
+Everything in the left-hand columns above still holds on a harness: detection
+fires, risk accumulates across turns, the session is marked terminated
+immediately, and **further prompts through the gateway are refused**. What does
+not happen is the runtime teardown, so the agent keeps running and simply loses
+its tools. Containment degrades from *session termination* to *tool denial*.
+
+The outcome is recorded as `unsupported` rather than `failed` — nothing is
+broken — and it raises the `DegradedComponents` alarm, because the operator is
+not getting the enforcement they may believe they have.
+
+**Self-managed runtimes are unaffected**, which is the shape a production
+deployment has. The bundled [demo runtime](demo-runtime.md) exists to make that
+path testable; the [test harness](test-harness.md) cannot demonstrate it.
+
 Only Tier 1 can refuse a prompt, and only in `gate` mode. The tiers are ordered
 by evidence: Tier 1 acts instantly on cheap certainty, Tier 3 waits for a
 pattern no single session could show.
