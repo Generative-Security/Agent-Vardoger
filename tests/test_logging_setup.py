@@ -38,6 +38,9 @@ ENTRY_MODULES = [
     "adapters/agentcore/enforcement_handler.py",
     "vardoger/tier2/handler.py",
     "vardoger/tier3/handler.py",
+    # Missed on the first pass, and the omission cost a diagnosis: the control
+    # plane's log group was silent while a dashboard call was failing.
+    "control_plane/lambda_handler.py",
 ]
 
 
