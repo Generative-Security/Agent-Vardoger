@@ -239,9 +239,16 @@ interceptor your agent does.
 
 **IAM inbound (SigV4).** `awscurl` is not preinstalled in CloudShell:
 
+Read the version your gateway accepts rather than copying one; gateways differ, and a mismatch is a hard error rather than a negotiation:
+
+```bash
+aws bedrock-agentcore-control get-gateway --gateway-identifier <gateway-id> --region <region> \
+  --query 'protocolConfiguration.mcp.supportedVersions'
+```
+
 ```bash
 pip3 install --user awscurl && export PATH="$HOME/.local/bin:$PATH"
-awscurl --service bedrock-agentcore --region us-east-1   -X POST "https://<gateway-id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"   -H "Content-Type: application/json"   -H "Accept: application/json, text/event-stream"   -H "MCP-Protocol-Version: 2025-03-26"   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+awscurl --service bedrock-agentcore --region us-east-1   -X POST "https://<gateway-id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"   -H "Content-Type: application/json"   -H "Accept: application/json, text/event-stream"   -H "MCP-Protocol-Version: <supported-version>"   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 **JWT inbound.** Same request with `curl` and
@@ -361,7 +368,7 @@ Set these before deploying; `deploy.sh` forwards them to the stack.
 | Variable | Default | Description |
 |---|---|---|
 | `VARDOGER_TEST_CONSOLE_GATEWAY_TOKEN` | *(none)* | Server-side default for the gateway's inbound OAuth token, so it need not be pasted into the browser. Read by the control plane, not by `deploy.sh`. |
-| `VARDOGER_MCP_PROTOCOL_VERSION` | `2025-03-26` | Protocol version sent as `MCP-Protocol-Version`. A gateway rejects a version outside its own `supportedVersions`; check yours with `get-gateway --query 'protocolConfiguration.mcp.supportedVersions'`. |
+| `VARDOGER_MCP_PROTOCOL_VERSION` | `2025-11-25` | Protocol version sent as `MCP-Protocol-Version`. **Usually leave this unset.** Supported versions vary per gateway, so the Test Console reads the supported list out of a rejection and retries once on the gateway's terms; setting this only changes which version is tried first. |
 
 ### Script behaviour
 

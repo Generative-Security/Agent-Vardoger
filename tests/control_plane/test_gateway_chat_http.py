@@ -230,11 +230,14 @@ class TestProtocolVersionNegotiation:
         The retry is only worth making when the named version DIFFERS from the
         one just refused; naming it back is a contradiction, not an instruction.
         """
+        # Derived from the module so changing the default cannot silently turn
+        # this into a different test than the one it claims to be.
+        sent = gateway_chat.MCP_PROTOCOL_VERSION
         sender, calls = _capture((json.dumps({
             "jsonrpc": "2.0", "id": 1,
             "error": {"code": -32600,
-                      "message": "Unsupported protocol version: 2025-03-26",
-                      "data": {"supported": ["2025-03-26"]}},
+                      "message": f"Unsupported protocol version: {sent}",
+                      "data": {"supported": [sent]}},
         }), 200))
         req = ChatRequest(prompt="hello", session_id=_SESSION,
                           gateway_url=_MCP_URL, tool_name="echo")
@@ -252,9 +255,21 @@ class TestProtocolVersionNegotiation:
             gateway_chat.send_message(req)
         assert len(calls) == 1
 
-    def test_the_default_version_is_one_a_gateway_actually_accepts(self):
-        """Guards the value itself, which has twice been wrong in the repo."""
-        assert gateway_chat._DEFAULT_MCP_PROTOCOL_VERSION == "2025-03-26"
+    def test_the_default_is_only_a_starting_point(self):
+        """Pinning a version is the wrong guarantee; two gateways disagreed.
+
+        Observed in one account: an older gateway advertising ["2025-03-26"] and
+        a new one advertising ["2025-11-25", "2026-07-28"]. So the default
+        cannot be right for everyone, and a test asserting one exact string
+        would just encode whichever gateway was looked at last. What must hold
+        is that a version-rejection is RECOVERABLE, which the retry tests above
+        cover. This only checks the default is a plausible MCP version, so a
+        typo or an empty override is still caught.
+        """
+        import re
+
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", gateway_chat._DEFAULT_MCP_PROTOCOL_VERSION)
+        assert gateway_chat.MCP_PROTOCOL_VERSION, "an empty version header is never valid"
 
 
 class TestMcpBranchIsUnchanged:

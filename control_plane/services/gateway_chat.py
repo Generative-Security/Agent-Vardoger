@@ -44,13 +44,19 @@ _MAX_RESPONSE_BYTES = 1_000_000
 # Check yours with:
 #   aws bedrock-agentcore-control get-gateway --gateway-identifier <id>
 #     --query 'protocolConfiguration.mcp.supportedVersions'
-# The MCP protocol version the gateway will accept is not stable across
-# gateways or over time, and a mismatch is a hard JSON-RPC error rather than a
-# negotiation. Two different hardcoded values have already been wrong against a
-# live gateway. This default is the version AgentCore gateways currently report
-# as supported; _negotiated_version below makes a wrong default self-correcting
-# rather than a support ticket, because the error names what IS supported.
-_DEFAULT_MCP_PROTOCOL_VERSION = "2025-03-26"
+# The MCP protocol version a gateway accepts is not stable across gateways, and
+# a mismatch is a hard JSON-RPC error rather than a negotiation. Two gateways in
+# ONE account were observed advertising disjoint sets:
+#
+#   ["2025-03-26"]                 an older gateway
+#   ["2025-11-25", "2026-07-28"]   a newly created one
+#
+# So no default is correct everywhere, and picking one is not the fix. This
+# value only decides which version is TRIED FIRST; correctness comes from
+# _negotiated_version below, which reads the supported list out of the
+# rejection and retries on the gateway's terms. It is set to what a newly
+# created gateway advertises, so the common case costs one round trip.
+_DEFAULT_MCP_PROTOCOL_VERSION = "2025-11-25"
 MCP_PROTOCOL_VERSION = (
     os.environ.get("VARDOGER_MCP_PROTOCOL_VERSION", _DEFAULT_MCP_PROTOCOL_VERSION).strip()
     or _DEFAULT_MCP_PROTOCOL_VERSION

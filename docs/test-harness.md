@@ -188,12 +188,19 @@ session; a third prompt on the same session is refused.
 
 ### From the command line
 
+Read the version your gateway accepts rather than copying one; gateways differ, and a mismatch is a hard error rather than a negotiation:
+
+```bash
+aws bedrock-agentcore-control get-gateway --gateway-identifier <gateway-id> --region <region> \
+  --query 'protocolConfiguration.mcp.supportedVersions'
+```
+
 ```bash
 curl -s -X POST "<TestHarnessGatewayUrl>/mcp" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "MCP-Protocol-Version: 2025-03-26" \
+  -H "MCP-Protocol-Version: <supported-version>" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
