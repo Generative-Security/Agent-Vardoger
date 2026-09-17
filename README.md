@@ -89,7 +89,9 @@ Deploy the agent-side components (dispatcher, enforcement) in your account, but 
 
 Stand up the self-hosted stack — interceptor, Tier 1 detection, and the dashboard — in your own AWS account. Defaults to single-operator mode (no auth setup). Tier 2 **ML classification** is optional and off until you point it at an endpoint (set `VARDOGER_ML_ENDPOINT`; see [docs/tier2-setup.md](docs/tier2-setup.md)) — the Tier 2 function itself always deploys, because it is what records prompt history for the dashboard and Tier 3.
 
-**Prerequisites:** an existing Amazon Bedrock AgentCore Gateway + agent runtime, AWS CLI configured, Python 3.12+, and Node.js 18+ (for the dashboard build). Don't have a gateway yet? The [Amazon Bedrock AgentCore docs](https://docs.aws.amazon.com/bedrock-agentcore/) and [AWS Workshop Studio](https://catalog.workshops.aws/) (search "Bedrock AgentCore") walk you through building one.
+**Prerequisites:** an existing Amazon Bedrock AgentCore Gateway + agent runtime, AWS CLI configured, Python 3.12+, and Node.js 18+ (for the dashboard build).
+
+**No gateway yet?** Set `VARDOGER_NEW_HARNESS=true` and the stack builds its own agent, gateway and echo tool, with the interceptor already attached — steps 2 and 4 below become unnecessary. It is a throwaway test rig, not a production pattern: see [docs/test-harness.md](docs/test-harness.md). To build a real one, the [Amazon Bedrock AgentCore docs](https://docs.aws.amazon.com/bedrock-agentcore/) and [AWS Workshop Studio](https://catalog.workshops.aws/) (search "Bedrock AgentCore") walk you through it.
 
 ```bash
 # 1. Clone and install
@@ -119,7 +121,14 @@ Then send a benign prompt (allowed) and an obvious attack like *"Ignore all prev
 
 All behavioral toggles are set the same way — export the env var before `./scripts/deploy.sh`, which forwards each to its CloudFormation parameter: `VARDOGER_TIER1_MODE` (`sidecar`/`gate`), `VARDOGER_DETECTION_FAILURE_POLICY` (`fail_open`/`fail_closed`), `VARDOGER_TIER3_ENABLED`, `VARDOGER_ML_ENDPOINT`, and the enforcement kill switches `VARDOGER_GLOBAL_KILL_ENABLED` / `VARDOGER_TIER2_KILL_ENABLED` / `VARDOGER_TIER3_KILL_ENABLED`.
 
-**Full walkthrough — including auth setup, the Test Console, and troubleshooting — is in [docs/quickstart.md](docs/quickstart.md).**
+**Next:**
+
+| | |
+|---|---|
+| [Quick start](docs/quickstart.md) | The full deploy walkthrough, auth setup and verification |
+| [Testing detection](docs/test-console.md) | Test Console setup, calling the gateway directly, what the interceptor actually sees |
+| [Configuration](docs/configuration.md) | Every environment variable, enforcement posture, teardown |
+| [Test harness](docs/test-harness.md) | The self-contained rig for when you have no gateway |
 
 ## Signatures
 

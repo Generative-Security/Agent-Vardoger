@@ -23,7 +23,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / "infra/self-hosted.yaml"
-QUICKSTART = ROOT / "docs/quickstart.md"
+# Teardown lives in the configuration reference, split out of the quickstart
+# so the quick start stays quick.
+TEARDOWN_DOC = ROOT / "docs/configuration.md"
 
 
 class _Loader(yaml.SafeLoader):
@@ -71,10 +73,10 @@ def bucket_names() -> dict[str, str]:
 
 @pytest.fixture(scope="module")
 def teardown_section() -> str:
-    text = QUICKSTART.read_text(encoding="utf-8")
-    match = re.search(r"^### Removing the stack$(.*?)^### ", text, re.M | re.S)
+    text = TEARDOWN_DOC.read_text(encoding="utf-8")
+    match = re.search(r"^## Removing the stack$(.*?)^## ", text, re.M | re.S)
     assert match, (
-        "docs/quickstart.md has no '### Removing the stack' section. Teardown "
+        "docs/configuration.md has no '## Removing the stack' section. Teardown "
         "instructions are what keep a non-empty bucket from blocking the next "
         "deploy; if the section moved, update this test deliberately."
     )
