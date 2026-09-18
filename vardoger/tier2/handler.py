@@ -755,6 +755,88 @@ def _regex_component_score(item: dict[str, Any]) -> float:
     return 0.0
 
 
+# Turns of the session to consider when looking for a progression. Long enough
+# to see a walk, short enough that an unrelated earlier number cannot anchor it.
+EXTRACTION_PROGRESSION_WINDOW = 6
+# Three points, not two: two consecutive numbers differing is unremarkable.
+EXTRACTION_MIN_TURNS = 3
+# Largest constant step still read as enumeration rather than an unrelated value.
+EXTRACTION_MAX_ENUMERATION_STEP = 10
+# Growth factor across the window that reads as escalating demand.
+EXTRACTION_ESCALATION_FACTOR = 4.0
+
+_DIGIT_RUN = re.compile(r"\d+")
+_NON_WORD = re.compile(r"[^a-z0-9\s]+")
+
+
+def _prompt_skeleton(text: str) -> str:
+    """The prompt with every number replaced, so 'order 1001' and 'order 1002' match."""
+    lowered = str(text or "").lower()
+    without_numbers = _DIGIT_RUN.sub(" # ", lowered)
+    cleaned = _NON_WORD.sub(" ", without_numbers)
+    return " ".join(cleaned.split())
+
+
+def _numbers_in(text: str) -> list[float]:
+    out: list[float] = []
+    for token in _DIGIT_RUN.findall(str(text or "")):
+        try:
+            out.append(float(token))
+        except ValueError:
+            continue
+    return out
+
+
+def _extraction_progression_score(
+    prompt: str, session_history: list[dict[str, Any]]
+) -> tuple[float, list[str]]:
+    """Score a numeric progression running through otherwise unremarkable turns.
+
+    Returns (score, reasons). Silent unless the same sentence shape carries a
+    strictly increasing number across at least EXTRACTION_MIN_TURNS turns.
+    """
+    turns = [str(item.get("prompt", "")) for item in session_history[-EXTRACTION_PROGRESSION_WINDOW:]]
+    current = str(prompt or "")
+    # The current prompt may already be the last history row, depending on the
+    # write ordering upstream; adding it twice would fake a progression.
+    if not turns or turns[-1].strip() != current.strip():
+        turns = turns + [current]
+    if len(turns) < EXTRACTION_MIN_TURNS:
+        return 0.0, []
+
+    # Group by sentence shape, keeping the numbers in positional order.
+    by_skeleton: dict[str, list[list[float]]] = {}
+    for turn in turns:
+        skeleton = _prompt_skeleton(turn)
+        # A skeleton of nothing but placeholders carries no subject to match on.
+        if len(skeleton.replace("#", "").split()) < 2:
+            continue
+        numbers = _numbers_in(turn)
+        if numbers:
+            by_skeleton.setdefault(skeleton, []).append(numbers)
+
+    score = 0.0
+    reasons: list[str] = []
+    for rows in by_skeleton.values():
+        if len(rows) < EXTRACTION_MIN_TURNS:
+            continue
+        width = min(len(r) for r in rows)
+        for position in range(width):
+            series = [r[position] for r in rows]
+            steps = [b - a for a, b in zip(series, series[1:])]
+            if not steps or any(step <= 0 for step in steps):
+                continue  # not strictly increasing
+            if all(step <= EXTRACTION_MAX_ENUMERATION_STEP for step in steps):
+                if "identifier_enumeration" not in reasons:
+                    score += 25.0
+                    reasons.append("identifier_enumeration")
+            if series[0] > 0 and series[-1] / series[0] >= EXTRACTION_ESCALATION_FACTOR:
+                if "quantity_escalation" not in reasons:
+                    score += 20.0
+                    reasons.append("quantity_escalation")
+    return score, reasons
+
+
 def _behaviour_score(prompt: str, session_history: list[dict[str, Any]]) -> tuple[float, list[str]]:
     """Score concrete risky behaviours visible in the current prompt and recent context."""
     text = " ".join(
@@ -767,6 +849,11 @@ def _behaviour_score(prompt: str, session_history: list[dict[str, Any]]) -> tupl
         if pattern.search(text):
             score += points
             reasons.append(reason)
+    # Structural signals the regexes cannot see: an attacker walking an ID space
+    # or growing a request never has to say anything incriminating.
+    progression_score, progression_reasons = _extraction_progression_score(prompt, session_history)
+    score += progression_score
+    reasons.extend(progression_reasons)
     return min(score, 100.0), reasons
 
 
