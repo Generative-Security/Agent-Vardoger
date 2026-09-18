@@ -109,19 +109,28 @@ Deploy the agent-side components (dispatcher, enforcement) in your account, but 
 
 Stand up the self-hosted stack — interceptor, Tier 1 detection, and the dashboard — in your own AWS account. Defaults to single-operator mode (no auth setup). Tier 2 **ML classification** is optional and off until you point it at an endpoint (set `VARDOGER_ML_ENDPOINT`; see [docs/tier2-setup.md](docs/tier2-setup.md)) — the Tier 2 function itself always deploys, because it is what records prompt history for the dashboard and Tier 3.
 
-**Prerequisites:** an existing Amazon Bedrock AgentCore Gateway + agent runtime, AWS CLI configured, Python 3.12+, and Node.js 18+ (for the dashboard build).
+**Prerequisites:** an existing Amazon Bedrock AgentCore Gateway + agent runtime, AWS CLI configured, Python 3.12+, and Node.js 20+ (for the dashboard build).
 
-**No gateway yet?** Set `VARDOGER_NEW_HARNESS=true` and the stack builds its own agent, gateway and echo tool, with the interceptor already attached — steps 2 and 4 below become unnecessary. It is a throwaway test rig, not a production pattern: see [docs/test-harness.md](docs/test-harness.md). To build a real one, the [Amazon Bedrock AgentCore docs](https://docs.aws.amazon.com/bedrock-agentcore/) and [AWS Workshop Studio](https://catalog.workshops.aws/) (search "Bedrock AgentCore") walk you through it.
+**No gateway yet?** The stack can build one, and **which one you pick decides what you can see.** Either way steps 2 and 4 below become unnecessary, and both are throwaway rigs rather than production patterns.
+
+```bash
+export VARDOGER_DEMO_RUNTIME=true     # recommended: gateway in FRONT of a self-managed
+                                      # runtime. The session kill works here.
+```
+
+This is the topology that matches a production deployment, and the only one where termination can actually be demonstrated — see [docs/demo-runtime.md](docs/demo-runtime.md). The alternative, `VARDOGER_NEW_HARNESS=true`, puts the gateway *behind* a managed agent so you can watch detection on real tool calls; AgentCore refuses to stop a harness-managed session, so the verification step below will show the prompt refused but the runtime still running ([docs/test-harness.md](docs/test-harness.md)).
+
+To build a real gateway instead, the [Amazon Bedrock AgentCore docs](https://docs.aws.amazon.com/bedrock-agentcore/) and [AWS Workshop Studio](https://catalog.workshops.aws/) (search "Bedrock AgentCore") walk you through it.
 
 ```bash
 # 1. Clone and install
 git clone https://github.com/Generative-Security/Agent-Vardoger.git
-cd agent-vardoger
+cd Agent-Vardoger
 make dev
 
 # 2. Point at the gateway and agent runtime you want to protect
-export VARDOGER_GATEWAY_ARN="arn:aws:bedrock:REGION:ACCOUNT:gateway/your-gateway"
-export VARDOGER_AGENT_RUNTIME_ARN="arn:aws:bedrock:REGION:ACCOUNT:agent-runtime/your-runtime"
+export VARDOGER_GATEWAY_ARN="arn:aws:bedrock-agentcore:REGION:ACCOUNT:gateway/your-gateway"
+export VARDOGER_AGENT_RUNTIME_ARN="arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/your-runtime"
 export VARDOGER_ALERT_EMAIL="security@yourcompany.com"   # optional
 
 # 3. Deploy (packages Lambda code, deploys CloudFormation, builds + uploads the dashboard)

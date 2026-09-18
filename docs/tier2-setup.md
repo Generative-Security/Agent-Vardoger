@@ -77,11 +77,22 @@ aws sagemaker create-model ...
 aws sagemaker create-endpoint-config ...
 aws sagemaker create-endpoint --endpoint-name your-model-name ...
 
-# Configure Agent Vardøger
+# Configure Agent Vardøger, then redeploy
 export VARDOGER_ML_ENDPOINT="your-model-name"
-export VARDOGER_ML_CONFIDENCE_THRESHOLD="0.85"
-export VARDOGER_ML_KILL_ENABLED="false"  # Start in shadow mode
+export VARDOGER_TIER2_KILL_ENABLED="false"   # shadow mode; this is the default
+./scripts/deploy.sh
 ```
+
+Those are the two that `deploy.sh` reads. Tier 2 starts in shadow mode on its
+own — `VARDOGER_TIER2_KILL_ENABLED` defaults to `false`, so Tier 2 scores and
+records without terminating anything until you set it to `true`.
+
+> **Not `VARDOGER_ML_KILL_ENABLED`.** That name is the *Lambda's* environment
+> variable, which the template sets from `VARDOGER_TIER2_KILL_ENABLED`.
+> Exporting it before a deploy has no effect and is silently overwritten.
+> `VARDOGER_ML_CONFIDENCE_THRESHOLD` (default `0.85`) is likewise not a deploy
+> parameter — it is a code default, changeable only on the deployed function's
+> configuration.
 
 ### Testing Your Model
 
@@ -97,4 +108,4 @@ Even a noisy model will produce useful results because the scoring pipeline caps
 
 Connect to the Agent Vardøger managed backend. ML inference is handled for you.
 
-Set `VARDOGER_TELEMETRY_MODE=managed` and `VARDOGER_MANAGED_INTAKE_URL` to the service endpoint provided during onboarding.
+The self-hosted template pins telemetry to `local`, so this is not a variable you export — managed onboarding supplies a template configured for `managed` telemetry and the intake endpoint that goes with it. See [managed-setup.md](managed-setup.md).
