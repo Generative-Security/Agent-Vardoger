@@ -429,9 +429,18 @@ if [ "$NEW_HARNESS" = "true" ]; then
     HARNESS_RUNTIME_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
         --query 'Stacks[0].Outputs[?OutputKey==`TestHarnessAgentRuntimeArn`].OutputValue' --output text 2>/dev/null || true)
     if [ -n "$HARNESS_RUNTIME_ARN" ] && [ "$HARNESS_RUNTIME_ARN" != "None" ]; then
-        AGENT_RUNTIME_ARN_EFFECTIVE="$HARNESS_RUNTIME_ARN"
         echo ""
         echo "  Test harness runtime: $HARNESS_RUNTIME_ARN"
+        # Only when there is no demo runtime to prefer. Both flags are
+        # independent, so both blocks can run in one deploy; without this guard
+        # the harness ARN silently overwrites the demo ARN set above and the
+        # kill grant lands on the runtime AWS refuses to stop.
+        if [ "$DEMO_RUNTIME" != "true" ] || [ -z "${DEMO_RUNTIME_ARN:-}" ] \
+                || [ "${DEMO_RUNTIME_ARN:-None}" = "None" ]; then
+            AGENT_RUNTIME_ARN_EFFECTIVE="$HARNESS_RUNTIME_ARN"
+        else
+            echo "  (kill grant stays scoped to the demo runtime, which can be stopped)"
+        fi
     fi
 fi
 
