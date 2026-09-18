@@ -82,6 +82,10 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="agent-vardoger-${ACCOUNT_ID}-${REGION}"
 ALERT_EMAIL="${VARDOGER_ALERT_EMAIL:-}"
 TIER2_ENDPOINT="${VARDOGER_ML_ENDPOINT:-}"
+TIER2_MODEL="${VARDOGER_TIER2_MODEL:-false}"          # let the stack build the endpoint
+# Ungated and Apache-2.0, so it works with no token. Gated models -- Llama
+# Prompt Guard 2 included -- also need VARDOGER_HF_TOKEN.
+TIER2_MODEL_ID="${VARDOGER_TIER2_MODEL_ID:-protectai/deberta-v3-base-prompt-injection-v2}"
 # Auth mode. Default "token" = single-operator self-host with a shared bearer
 # secret over the Function URL. "none" is DEV ONLY (open). "cognito" adds team
 # RBAC behind an API Gateway JWT authorizer.
@@ -160,6 +164,15 @@ if [ "$AUTH_SECRET_USE_PREVIOUS" = "1" ]; then
     AUTH_SECRET_OVERRIDE=()
 fi
 
+# Same omit-to-retain rule for the Hugging Face token, for the same reason:
+# `deploy` has no UsePreviousValue, so passing an empty override would clear a
+# token a gated model needs. Nothing fails at deploy time -- the container fails
+# its authenticated pull afterwards, which is far harder to connect back.
+HF_TOKEN_OVERRIDE=()
+if [ -n "${VARDOGER_HF_TOKEN:-}" ]; then
+    HF_TOKEN_OVERRIDE=("HuggingFaceToken=${VARDOGER_HF_TOKEN}")
+fi
+
 # The dashboard is served via CloudFront (HTTPS), whose domain is only known
 # after the stack exists. We deploy once with localhost dev origins, then read
 # the CloudFront domain and re-apply CORS to include it (a cheap second pass;
@@ -174,6 +187,9 @@ echo "Auth mode:    $AUTH_MODE"
 echo "Tier 1 mode:  $TIER1_MODE"
 echo "Log level:   $LOG_LEVEL"
 echo "Demo runtime: $DEMO_RUNTIME"
+if [ "$TIER2_MODEL" = "true" ]; then
+    echo "Tier 2 model: $TIER2_MODEL_ID (stack-built serverless endpoint)"
+fi
 echo "Detect fail:  $DETECTION_FAILURE_POLICY"
 echo "Tier 2 ML:    ${TIER2_ENDPOINT:-disabled}"
 echo "Tier 3:       $TIER3_ENABLED"
@@ -336,6 +352,9 @@ aws cloudformation deploy \
         "DemoAgentS3Key=$DEMO_AGENT_S3_KEY" \
         "DetectionFailurePolicy=$DETECTION_FAILURE_POLICY" \
         "Tier2MlEndpoint=$TIER2_ENDPOINT" \
+        "DeployTier2Model=$TIER2_MODEL" \
+        "Tier2ModelId=$TIER2_MODEL_ID" \
+        ${HF_TOKEN_OVERRIDE[@]+"${HF_TOKEN_OVERRIDE[@]}"} \
         "Tier2KillEnabled=$TIER2_KILL_ENABLED" \
         "Tier3Enabled=$TIER3_ENABLED" \
         "Tier3KillEnabled=$TIER3_KILL_ENABLED" \
@@ -473,6 +492,9 @@ if [ -n "$DASHBOARD_URL" ] && [ "$DASHBOARD_URL" != "None" ]; then
         "DemoAgentS3Key=$DEMO_AGENT_S3_KEY" \
             "DetectionFailurePolicy=$DETECTION_FAILURE_POLICY" \
             "Tier2MlEndpoint=$TIER2_ENDPOINT" \
+        "DeployTier2Model=$TIER2_MODEL" \
+        "Tier2ModelId=$TIER2_MODEL_ID" \
+        ${HF_TOKEN_OVERRIDE[@]+"${HF_TOKEN_OVERRIDE[@]}"} \
             "Tier2KillEnabled=$TIER2_KILL_ENABLED" \
             "Tier3Enabled=$TIER3_ENABLED" \
             "Tier3KillEnabled=$TIER3_KILL_ENABLED" \

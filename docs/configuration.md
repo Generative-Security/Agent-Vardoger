@@ -52,6 +52,17 @@ gateway and has no agent runtime to terminate.
 |---|---|---|
 | `VARDOGER_DEMO_RUNTIME` | `false` | Build a **self-managed** AgentCore Runtime for Vardøger to protect — a dependency-free echo agent packaged from `infra/demo_agent/main.py`. This is the runtime shape a production deployment has, and **the only one on which the session kill can be demonstrated**: AgentCore refuses `StopRuntimeSession` on a harness-managed runtime, so `VARDOGER_NEW_HARNESS` cannot prove enforcement however it is configured. |
 
+## Tier 2 model endpoint
+
+| Variable | Default | Effect |
+|---|---|---|
+| `VARDOGER_TIER2_MODEL` | `false` | Build a **serverless** SageMaker endpoint for Tier 2 and point Tier 2 at it. Serverless because nothing schedules the keep-alive, so a real-time endpoint would bill around the clock for a model invoked only when prompts arrive. Overrides `VARDOGER_ML_ENDPOINT`. |
+| `VARDOGER_TIER2_MODEL_ID` | `protectai/deberta-v3-base-prompt-injection-v2` | Hugging Face model id to serve. The default is ungated and Apache-2.0, so it needs no token and no licence acceptance. |
+| `VARDOGER_HF_TOKEN` | *(none)* | Hugging Face access token. Required **only** for gated models such as Llama Prompt Guard 2. Omitted on a redeploy, the previous value is retained — passing an empty one would clear a token the model depends on, and nothing would fail until the container's next pull. |
+
+The endpoint is named `vardoger-tier2-<stack-name>`, and `sagemaker:InvokeEndpoint`
+is scoped to exactly that ARN. See [tier2-setup.md](tier2-setup.md).
+
 ## Observability
 
 | Variable | Default | Description |

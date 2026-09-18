@@ -116,7 +116,54 @@ Parameters:
   Tier2MlEndpoint:
     Type: String
     Default: ""
-    Description: Optional SageMaker endpoint for Tier 2 ML (leave empty to disable)
+    Description: >
+      Name of an EXISTING SageMaker endpoint for Tier 2 ML. Leave empty to
+      disable classification, or set DeployTier2Model=true to have this stack
+      build one instead.
+  DeployTier2Model:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Build a serverless SageMaker endpoint for Tier 2 and point Tier 2 at it.
+      Serverless because nothing schedules the keep-alive, so a real-time
+      endpoint would bill around the clock for a model invoked only when prompts
+      arrive. Overrides Tier2MlEndpoint.
+  Tier2ModelId:
+    Type: String
+    Default: "protectai/deberta-v3-base-prompt-injection-v2"
+    Description: >
+      Hugging Face model id to serve. The default is ungated and Apache-2.0, so
+      it needs no token and no licence acceptance, and its INJECTION label is
+      already recognised. Gated models (including Llama Prompt Guard 2) also
+      require HuggingFaceToken.
+  Tier2ModelImageUri:
+    Type: String
+    Default: ""
+    Description: >
+      Hugging Face inference container to run. Leave empty for the regional
+      default. Override to pin a different version; see
+      https://github.com/aws/deep-learning-containers/blob/master/available_images.md
+  Tier2ModelMemoryMB:
+    Type: Number
+    Default: 4096
+    AllowedValues: [1024, 2048, 3072, 4096, 5120, 6144]
+    Description: >
+      Serverless memory. Must be at least as large as the model; SageMaker
+      allocates vCPU proportionally.
+  Tier2ModelMaxConcurrency:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 200
+    Description: Concurrent invocations the endpoint will serve before throttling.
+  HuggingFaceToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Hugging Face access token, required ONLY for gated models such as Llama
+      Prompt Guard 2. Accept the model's licence on huggingface.co first.
   Tier2KillEnabled:
     Type: String
     Default: "false"
@@ -238,7 +285,13 @@ Conditions:
   # deployed". Tier2Function is deployed unconditionally because it is the only
   # writer of PromptHistory, which Prompt History and Tier 3 both read. This
   # condition now gates only the SageMaker IAM grant.
-  EnableTier2: !Not [!Equals [!Ref Tier2MlEndpoint, ""]]
+  DeployTier2ModelEndpoint: !Equals [!Ref DeployTier2Model, "true"]
+  HasTier2Token: !Not [!Equals [!Ref HuggingFaceToken, ""]]
+  HasTier2ImageOverride: !Not [!Equals [!Ref Tier2ModelImageUri, ""]]
+  # Tier 2 has a model when one was supplied OR when this stack built one.
+  EnableTier2: !Or
+    - !Equals [!Ref DeployTier2Model, "true"]
+    - !Not [!Equals [!Ref Tier2MlEndpoint, ""]]
   EnableTier3: !Equals [!Ref Tier3Enabled, "true"]
   # Change 2: Cognito/API Gateway auth. Cognito resources exist only for the
   # cognito modes; the Function URL exists for none/token (token adds a
@@ -1087,7 +1140,10 @@ Resources:
                 - EnableTier2
                 - Effect: Allow
                   Action: sagemaker:InvokeEndpoint
-                  Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${Tier2MlEndpoint}"
+                  Resource: !If
+                    - DeployTier2ModelEndpoint
+                    - !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/vardoger-tier2-${AWS::StackName}"
+                    - !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${Tier2MlEndpoint}"
                 - !Ref "AWS::NoValue"
               - Effect: Allow
                 Action: lambda:InvokeFunction
@@ -1154,7 +1210,13 @@ Resources:
       Environment:
         Variables:
           VARDOGER_LOG_LEVEL: !Ref LogLevel
-          VARDOGER_ML_ENDPOINT: !Ref Tier2MlEndpoint
+          # A stack-built endpoint wins: if DeployTier2Model is true, that is
+          # the endpoint the IAM grant above is scoped to, so pointing the
+          # function anywhere else would deny on every invoke.
+          VARDOGER_ML_ENDPOINT: !If
+            - DeployTier2ModelEndpoint
+            - !Sub "vardoger-tier2-${AWS::StackName}"
+            - !Ref Tier2MlEndpoint
           VARDOGER_PROMPT_HISTORY_TABLE: !Ref PromptHistoryTable
           VARDOGER_SESSION_RISK_TABLE: !Ref SessionRiskTable
           VARDOGER_DETECTION_EVENTS_TABLE: !Ref DetectionEventsTable
@@ -1667,6 +1729,98 @@ Resources:
   # runtime the stack owns, so StopRuntimeSession applies to it, and it is the
   # same shape a production deployment has.
   # ===========================================================================
+  # ---------------------------------------------------------------------
+  # Tier 2 model endpoint (optional)
+  #
+  # Serving a Hugging Face classifier behind SageMaker Serverless Inference, so
+  # attaching a model to Tier 2 does not require Studio or a Python SDK script.
+  # The endpoint name is derived, not generated, so the IAM grant above can be
+  # scoped to it without a circular dependency.
+  # ---------------------------------------------------------------------
+  Tier2ModelRole:
+    Type: AWS::IAM::Role
+    Condition: DeployTier2ModelEndpoint
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: sagemaker.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+      Policies:
+        - PolicyName: Tier2ModelServing
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Pull the inference container. GetAuthorizationToken is not
+              # resource-scopable; the rest are pinned to the DLC registry.
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:763104351884:repository/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/Endpoints/*"
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: ["AWS/SageMaker", "/aws/sagemaker/Endpoints"]
+
+  Tier2Model:
+    Type: AWS::SageMaker::Model
+    Condition: DeployTier2ModelEndpoint
+    Properties:
+      ExecutionRoleArn: !GetAtt Tier2ModelRole.Arn
+      PrimaryContainer:
+        # Regional default is the Hugging Face PyTorch inference DLC. The
+        # registry account (763104351884) is the same in every commercial
+        # region; only the region segment changes.
+        Image: !If
+          - HasTier2ImageOverride
+          - !Ref Tier2ModelImageUri
+          - !Sub "763104351884.dkr.ecr.${AWS::Region}.amazonaws.com/huggingface-pytorch-inference:2.6.0-transformers4.51.3-cpu-py312-ubuntu22.04"
+        Environment:
+          HF_MODEL_ID: !Ref Tier2ModelId
+          # The handler posts {"inputs": text} and reads [{"label","score"}].
+          # That is this task's contract; changing it breaks _invoke_ml.
+          HF_TASK: text-classification
+          # Only rendered when supplied -- an empty token would make the
+          # container attempt an authenticated pull with no credential.
+          HF_TOKEN: !If [HasTier2Token, !Ref HuggingFaceToken, !Ref "AWS::NoValue"]
+          HF_API_TOKEN: !If [HasTier2Token, !Ref HuggingFaceToken, !Ref "AWS::NoValue"]
+
+  Tier2ModelEndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Condition: DeployTier2ModelEndpoint
+    Properties:
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !GetAtt Tier2Model.ModelName
+          ServerlessConfig:
+            MemorySizeInMB: !Ref Tier2ModelMemoryMB
+            MaxConcurrency: !Ref Tier2ModelMaxConcurrency
+
+  Tier2ModelEndpoint:
+    Type: AWS::SageMaker::Endpoint
+    Condition: DeployTier2ModelEndpoint
+    Properties:
+      # Derived from the stack name so the IAM grant can name it up front.
+      EndpointName: !Sub "vardoger-tier2-${AWS::StackName}"
+      EndpointConfigName: !GetAtt Tier2ModelEndpointConfig.EndpointConfigName
+
   DemoAgentRuntimeRole:
     Type: AWS::IAM::Role
     Condition: DeployDemoRuntime
@@ -2389,6 +2543,14 @@ Outputs:
     Description: Harness name to select in the AgentCore Harness playground.
     Value: !Sub "vardoger_test_${AWS::AccountId}"
 
+  Tier2ModelEndpointName:
+    Condition: DeployTier2ModelEndpoint
+    Description: SageMaker endpoint serving the Tier 2 classifier.
+    Value: !GetAtt Tier2ModelEndpoint.EndpointName
+  Tier2ModelServed:
+    Condition: DeployTier2ModelEndpoint
+    Description: Hugging Face model id being served for Tier 2.
+    Value: !Ref Tier2ModelId
   DemoGatewayUrl:
     Condition: DeployDemoRuntime
     Description: >

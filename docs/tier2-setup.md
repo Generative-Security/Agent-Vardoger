@@ -33,16 +33,33 @@ and jailbreak attempts, and needs no training to be useful:
 | `meta-llama/Llama-Prompt-Guard-2-86M` | 86M | Default. Best accuracy of the two. |
 | `meta-llama/Llama-Prompt-Guard-2-22M` | 22M | High prompt volume, or cost per invocation matters more than recall. |
 
+**Not the original Prompt Guard.** Meta's first Prompt Guard 86M is still
+listed in places, including some JumpStart catalogues. Its own successor's model
+card reports recall at a 1% false-positive rate rising from **21.2% to 97.5%**
+between v1 and v2 — at a usable threshold, v1 misses roughly four attacks in
+five. Fine for confirming an integration works; not something to give the power
+to terminate sessions.
+
 It is a binary classifier (benign vs. malicious). Its positive-class label —
 whether the endpoint emits `MALICIOUS`, `LABEL_1`, or `1` — is **already in the
 handler's `ATTACK_LABELS` set**, so it is a drop-in with no mapping layer.
 Confirm the label your deployed endpoint actually returns; the handler
 uppercases before matching.
 
-Licensing: Prompt Guard 2 is released under the **Llama Community License**.
-Read its acceptable-use terms before deploying commercially — they are more
-restrictive than Apache 2.0, and the redistribution and naming clauses matter if
-you ship it as part of a product rather than running it yourself.
+**Licensing.** Prompt Guard 2 is released under the **Llama Community
+License**, and it is a **gated** model: you must accept the licence on
+huggingface.co and supply an access token (`VARDOGER_HF_TOKEN`) before it can be
+pulled. Two clauses matter if you ship it rather than merely run it:
+
+- If you distribute a product containing the model or its outputs, you must
+  **prominently display "Built with Llama"**.
+- Any AI model you create using these materials must have a name **beginning
+  with "Llama"**.
+
+Agent Vardøger neither bundles nor redistributes the model — setting
+`VARDOGER_TIER2_MODEL_ID` pulls it into *your* account under *your* acceptance
+of the licence — but if you build a product on top of a Vardøger deployment
+serving Prompt Guard, those obligations are yours.
 
 Because Tier 2 runs **asynchronously** — it is not in the request path, and its
 lever is terminating the session rather than refusing a prompt — a slower, more
@@ -92,7 +109,36 @@ classifying it — that is Tier 2 working correctly, and it is the state a defau
 deploy is in. **No rows means the queue, the function or its permissions are
 broken, and a model will not fix it.**
 
-#### Step 1 — deploy the model to a **serverless** endpoint
+#### Step 1 — let the stack build the endpoint
+
+```bash
+export VARDOGER_TIER2_MODEL=true
+./scripts/deploy.sh
+```
+
+That is the whole thing. The stack creates a serverless SageMaker endpoint named
+`vardoger-tier2-<stack-name>`, serves
+`protectai/deberta-v3-base-prompt-injection-v2` on it, grants
+`sagemaker:InvokeEndpoint` scoped to exactly that ARN, and points Tier 2 at it —
+no Studio, no Python, and teardown happens with the stack. **Skip to step 3.**
+
+To serve something else:
+
+```bash
+export VARDOGER_TIER2_MODEL_ID="<hf-model-id>"
+export VARDOGER_HF_TOKEN="hf_..."        # gated models only
+```
+
+The default is ungated and Apache-2.0, so it works on first run. Anything gated
+— Llama Prompt Guard 2 included — needs you to accept its licence on
+huggingface.co and supply a token.
+
+> **Which model actually matters here.** The default proves the wiring and is
+> reasonable in shadow mode. Before enabling Tier 2 kills, read
+> [Recommended: Llama Prompt Guard 2](#recommended-llama-prompt-guard-2) — a
+> weak classifier with the power to end sessions is worse than no classifier.
+
+#### Step 1 (alternative) — deploy the model yourself
 
 Use [SageMaker Serverless Inference](https://docs.aws.amazon.com/sagemaker/latest/dg/serverless-endpoints.html),
 not a real-time endpoint. A real-time endpoint bills for every hour it exists;
