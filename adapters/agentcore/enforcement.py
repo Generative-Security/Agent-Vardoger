@@ -36,6 +36,12 @@ TERMINATE_DEFERRED = "deferred"
 # because nothing about the session id is in doubt.
 TERMINATE_UNSUPPORTED = "unsupported"
 
+# No agent runtime ARN is configured, so there was nothing to call. Distinct
+# from "failed" (the call errored) and from "deferred" (still in flight): this
+# session will never be terminated, and the row would otherwise sit on
+# "deferred" forever while the alert claimed success.
+TERMINATE_NOT_CONFIGURED = "not_configured"
+
 
 def _default_runtime_session_id(session_id: str) -> str:
     """Return the AgentCore runtime session ID used by the sandbox chat target.

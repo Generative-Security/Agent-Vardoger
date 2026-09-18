@@ -68,7 +68,7 @@ export default function HealthPage() {
               <Flag label="Tier 3 enabled" value={status?.tier3_enabled} />
               <Flag label="Global kill enabled" value={status?.global_kill_enabled} />
               <Flag label="ML endpoint configured" value={status?.ml_endpoint_configured} />
-              <Flag label="Signature feed configured" value={status?.signature_feed_configured} />
+              <Flag label="Premium signatures" value={status?.premium_signatures_configured} />
               <Flag label="Managed intake configured" value={status?.managed_intake_configured} />
             </div>
           </section>

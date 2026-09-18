@@ -792,8 +792,12 @@ def _apply_tenant_policy_to_finding(finding: Finding, tenant_policy: dict[str, A
     """
     mode = _normalize_mode(tenant_policy.get("tier3_mode"), "shadow")
     min_sessions = _to_int(tenant_policy.get("tier3_min_sessions_for_kill")) or 3
-    similarity_threshold = _to_float(tenant_policy.get("tier3_similarity_threshold")) or 0.90
-    kill_threshold = _to_float(tenant_policy.get("tier3_kill_threshold")) or 0.95
+    # `x or default` discards a legitimately stored 0.0 -- which is how an
+    # operator disables a threshold -- and silently restores the default. Tier 2
+    # already uses the value-preserving form; this is the same record read two
+    # ways, which vardoger/policy.py exists to prevent.
+    similarity_threshold = _to_float(tenant_policy.get("tier3_similarity_threshold"), 0.90)
+    kill_threshold = _to_float(tenant_policy.get("tier3_kill_threshold"), 0.95)
     sessions_ok = len(finding.affected_sessions) >= min_sessions
     confidence_ok = finding.confidence >= kill_threshold
     similarity_ok = finding.similarity_score >= similarity_threshold

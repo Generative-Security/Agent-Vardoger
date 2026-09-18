@@ -257,7 +257,7 @@ export interface SettingsStatus {
   ml_endpoint_configured: boolean;
   tier3_enabled: boolean;
   global_kill_enabled: boolean;
-  signature_feed_configured: boolean;
+  premium_signatures_configured: boolean;
   managed_intake_configured: boolean;
 }
 

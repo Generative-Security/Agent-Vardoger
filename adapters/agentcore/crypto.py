@@ -75,8 +75,13 @@ def encrypt_and_log(
 
         return record
 
-    except Exception:
+    except Exception as exc:
+        # Losing evidence is not an enforcement failure, so this still returns
+        # None rather than raising -- but it must not be invisible. KMS denial,
+        # an AES-GCM error or a missing cryptography import all land here, and
+        # the system otherwise looks entirely healthy while recording nothing.
         logger.exception("Encryption failed for session %s", session_id)
+        report_degraded(EVIDENCE_STORE, f"evidence not recorded: {exc}", session_id=session_id)
         return None
 
 

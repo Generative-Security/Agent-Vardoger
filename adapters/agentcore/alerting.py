@@ -10,9 +10,10 @@ import logging
 import time
 from typing import Any
 
-from adapters.agentcore.enforcement import terminate_session_detailed
+from adapters.agentcore.enforcement import TERMINATE_NOT_CONFIGURED, terminate_session_detailed
 from adapters.agentcore.session_registry import record_kill_outcome
 from vardoger import aws, config
+from vardoger.health import ALERTING, ENFORCEMENT, report_degraded
 from vardoger.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -41,11 +42,31 @@ def _publish_sns_alert(record: dict[str, Any]) -> None:
     try:
         aws.client("sns").publish(
             TopicArn=topic_arn,
-            Subject=f"Agent Vardøger Alert: Session {session_id[:8]} terminated",
+            Subject=_alert_subject(session_id, str(record.get("kill_outcome", ""))),
             Message=json.dumps(message, indent=2),
         )
-    except Exception:
+    except Exception as exc:
+        # The kill already happened; only the notification is lost. But an
+        # operator whose alerting is quietly broken believes nothing is
+        # happening, so this has to surface somewhere other than the log.
         logger.exception("Failed to publish SNS alert for session %s", session_id)
+        report_degraded(ALERTING, f"SNS publish failed: {exc}", session_id=session_id)
+
+
+def _alert_subject(session_id: str, kill_outcome: str) -> str:
+    """Subject line that matches what actually happened to the session.
+
+    This asserted "terminated" unconditionally, including on the path where no
+    runtime ARN was configured and no kill was ever attempted.
+    """
+    short = session_id[:8]
+    if kill_outcome == TERMINATE_NOT_CONFIGURED:
+        return f"Agent Vardøger Alert: Session {short} flagged (NOT terminated)"
+    if kill_outcome in {"failed", "unsupported"}:
+        return f"Agent Vardøger Alert: Session {short} flagged, termination {kill_outcome}"
+    if kill_outcome == "unverified":
+        return f"Agent Vardøger Alert: Session {short} termination unverified"
+    return f"Agent Vardøger Alert: Session {short} terminated"
 
 
 def _severity_label(risk_score: int) -> str:
@@ -140,6 +161,18 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 body["kill_outcome"] = outcome
                 record_kill_outcome(
                     body["session_id"], outcome, runtime_session_id=runtime_session_id
+                )
+            else:
+                # Nothing to call. This previously fell straight through to the
+                # alert, so an operator was told the session was terminated
+                # while the registry row sat on "deferred" forever -- the two
+                # records disagreeing, with nothing raised either way.
+                body["kill_outcome"] = TERMINATE_NOT_CONFIGURED
+                record_kill_outcome(body["session_id"], TERMINATE_NOT_CONFIGURED)
+                report_degraded(
+                    ENFORCEMENT,
+                    "no agent runtime ARN configured; session flagged but NOT terminated",
+                    session_id=body.get("session_id", ""),
                 )
 
             _publish_sns_alert(body)

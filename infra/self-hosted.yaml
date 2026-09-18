@@ -1443,6 +1443,17 @@ Resources:
           VARDOGER_SESSION_RISK_TABLE: !Ref SessionRiskTable
           VARDOGER_OUTCOME_TABLE: !Ref OutcomeLedgerTable
           VARDOGER_TENANTS_TABLE: !Ref ScopeConfigTable
+          # Read by the Settings panel. Without these it reported defaults --
+          # Tier 3 always on, ML never configured, global kill always off --
+          # whatever the stack was actually running.
+          VARDOGER_ML_ENDPOINT: !If
+            - DeployTier2ModelEndpoint
+            - !Sub "vardoger-tier2-${AWS::StackName}"
+            - !Ref Tier2MlEndpoint
+          VARDOGER_TIER3_ENABLED: !Ref Tier3Enabled
+          VARDOGER_GLOBAL_KILL_ENABLED: !Ref GlobalKillEnabled
+          VARDOGER_TIER2_KILL_ENABLED: !Ref Tier2KillEnabled
+          VARDOGER_PREMIUM_SIGNATURE_BUCKET: !Ref PremiumSignatureBucket
           VARDOGER_CORS_ORIGINS: !Ref CorsAllowOrigins
           VARDOGER_AUTH_MODE: !Ref AuthMode
           VARDOGER_AUTH_SECRET: !Ref AuthSecret

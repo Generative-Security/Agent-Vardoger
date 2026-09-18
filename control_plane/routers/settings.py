@@ -47,9 +47,9 @@ def status() -> dict[str, str | bool]:
         "auth_mode": config.AUTH_MODE,
         "scope_id": config.scope_id(),
         "ml_endpoint_configured": bool(os.environ.get("VARDOGER_ML_ENDPOINT", "")),
-        "tier3_enabled": os.environ.get("TIER3_ENABLED", "true").lower() == "true",
+        "tier3_enabled": os.environ.get("VARDOGER_TIER3_ENABLED", "false").lower() == "true",
         "global_kill_enabled": os.environ.get("VARDOGER_GLOBAL_KILL_ENABLED", "false").lower() == "true",
-        "signature_feed_configured": bool(os.environ.get("VARDOGER_SIGNATURE_FEED_URL", "")),
+        "premium_signatures_configured": bool(os.environ.get("VARDOGER_PREMIUM_SIGNATURE_BUCKET", "")),
         "managed_intake_configured": bool(_managed_intake_url()),
     }
 

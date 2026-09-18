@@ -24,6 +24,7 @@ expensive (it parses service JSON) and Lambda containers are reused.
 """
 from __future__ import annotations
 
+import copy
 import os
 import threading
 from typing import Any
@@ -68,8 +69,16 @@ def _region() -> str | None:
 
 
 def _config(kind: str) -> Config:
+    """Return a FRESH copy of the profile for ``kind``.
+
+    botocore mutates the Config it is handed -- it normalises ``retries`` in
+    place, replacing ``max_attempts`` with ``total_max_attempts`` -- so handing
+    out the shared module-level object let the first client constructed rewrite
+    the profile every later client would receive. Copying keeps INLINE_CONFIG
+    and ASYNC_CONFIG meaning what they say they mean.
+    """
     try:
-        return _CONFIGS[kind]
+        return copy.deepcopy(_CONFIGS[kind])
     except KeyError:  # pragma: no cover - programming error
         raise ValueError(f"Unknown client kind {kind!r}; expected 'inline' or 'async'") from None
 

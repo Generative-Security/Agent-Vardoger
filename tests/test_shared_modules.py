@@ -137,3 +137,32 @@ class TestPolicyParser:
         # trip from every Tier 2 prompt.
         assert table.get_item.call_count == 1
         policy.invalidate_cache()
+
+
+class TestConfigIsolation:
+    """A client must not be able to rewrite the profile the next one gets."""
+
+    def test_building_a_client_does_not_mutate_the_shared_profile(self):
+        """botocore normalises `retries` IN PLACE on the Config it is handed.
+
+        Handing out the module-level object let the first client constructed
+        replace `max_attempts` with `total_max_attempts` for every later client.
+        Nothing caught it until a test happened to build a real client first.
+        """
+        before = dict(aws.ASYNC_CONFIG.retries)
+        aws.reset_cache()
+        try:
+            aws.client("sns", kind="async", region="us-east-1")
+        except Exception:
+            pass  # no credentials in CI; construction alone is what mutates
+        finally:
+            aws.reset_cache()
+        assert aws.ASYNC_CONFIG.retries == before, (
+            "building a client rewrote the shared ASYNC_CONFIG; every later "
+            "client would get a different retry profile than the one declared"
+        )
+
+    def test_each_client_gets_its_own_config_object(self):
+        assert aws._config("async") is not aws.ASYNC_CONFIG
+        assert aws._config("async") is not aws._config("async")
+        assert aws._config("async").retries == aws.ASYNC_CONFIG.retries

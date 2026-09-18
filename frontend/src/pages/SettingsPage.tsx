@@ -74,7 +74,7 @@ export default function SettingsPage() {
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <Flag label="ML endpoint configured" value={status?.ml_endpoint_configured} />
           <Flag label="Global kill enabled" value={status?.global_kill_enabled} />
-          <Flag label="Signature feed configured" value={status?.signature_feed_configured} />
+          <Flag label="Premium signatures" value={status?.premium_signatures_configured} />
           <Flag label="Managed intake configured" value={status?.managed_intake_configured} />
         </div>
       </section>

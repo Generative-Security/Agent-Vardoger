@@ -43,6 +43,9 @@ OUTCOME_LEDGER = "outcome_ledger"
 EVIDENCE_STORE = "evidence_store"
 TENANT_POLICY = "tenant_policy"
 ENFORCEMENT = "enforcement"
+# Notification, not containment: the kill still happened. But an operator whose
+# alerting is quietly broken believes nothing is happening at all.
+ALERTING = "alerting"
 # Tier 1 could not evaluate a prompt at all. Under a fail-open detection policy
 # this is the ONLY signal that traffic went uninspected, so it must alarm.
 INLINE_DETECTION = "inline_detection"
