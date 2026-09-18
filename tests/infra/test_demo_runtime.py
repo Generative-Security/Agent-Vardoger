@@ -364,3 +364,74 @@ class TestThePreconditionsKnowAboutBothModes:
         assert assign < first_use, (
             "DEMO_RUNTIME is read by a precondition before it is assigned"
         )
+
+
+class TestOutputsAreVisibleWheneverTheirResourceExists:
+    """An output gated more narrowly than its resource is a resource nobody
+    can find.
+
+    The Cognito pool moved to a shared condition so the demo gateway could use
+    it, but its three outputs stayed on `DeployTestHarness`. With the harness
+    off and the demo on, the pool existed and NOTHING published its token
+    endpoint, client id or pool id — so the Test Console asked for a bearer
+    token that could not be obtained from the stack at all.
+
+    Nothing else compares the two. cfn-lint checks that a referenced resource
+    exists, not that the conditions agree.
+    """
+
+    def test_no_output_is_gated_more_narrowly_than_what_it_describes(
+        self, template: dict
+    ) -> None:
+        resources, outputs = template["Resources"], template["Outputs"]
+        mismatched = []
+        for name, output in outputs.items():
+            value = str(output.get("Value"))
+            for res_name, body in resources.items():
+                if res_name not in value:
+                    continue
+                res_cond = body.get("Condition")
+                if res_cond and output.get("Condition") != res_cond:
+                    mismatched.append(
+                        f"{name} (Condition: {output.get('Condition')}) describes "
+                        f"{res_name} (Condition: {res_cond})"
+                    )
+        assert not mismatched, (
+            "outputs whose condition disagrees with the resource they describe: "
+            f"{mismatched}. Either the output is published when the resource "
+            "does not exist, or the resource exists and cannot be found."
+        )
+
+    def test_the_gateway_auth_outputs_follow_the_shared_pool(
+        self, template: dict
+    ) -> None:
+        """Explicit, because these are the three an operator needs to obtain a
+        token, and a generic check would pass if all four moved together in the
+        wrong direction."""
+        for name in ("TestHarnessTokenEndpoint", "TestHarnessClientId",
+                     "TestHarnessUserPoolId"):
+            assert template["Outputs"][name]["Condition"] == "NeedsGatewayAuth", (
+                f"{name} is not published when only the demo runtime is deployed, "
+                "so its gateway token cannot be obtained"
+            )
+
+
+class TestTheDemoSummaryExplainsTheToken:
+    """The Test Console asks for a bearer token; the summary must say which.
+
+    It is a machine-to-machine token for the GATEWAY, not the Cognito login
+    used for the dashboard — which is the natural thing to try, and the thing
+    that fails with no indication why.
+    """
+
+    SCRIPT = DEPLOY_SH.read_text(encoding="utf-8")
+
+    def test_the_demo_summary_prints_token_instructions(self) -> None:
+        summary = self.SCRIPT[self.SCRIPT.index("=== Demo runtime (self-managed) ==="):]
+        assert "Get a GATEWAY bearer token" in summary[:3000], (
+            "the demo summary gives an endpoint but no way to authenticate to it"
+        )
+
+    def test_it_distinguishes_the_gateway_token_from_the_console_login(self) -> None:
+        summary = self.SCRIPT[self.SCRIPT.index("=== Demo runtime (self-managed) ==="):]
+        assert "NOT the Cognito login" in summary[:3000]

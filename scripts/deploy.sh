@@ -574,6 +574,27 @@ if [ "$DEMO_RUNTIME" = "true" ]; then
     echo "  kill is demonstrable here. AgentCore refuses StopRuntimeSession on a"
     echo "  harness-managed runtime."
     echo ""
+    DEMO_POOL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`TestHarnessUserPoolId`].OutputValue' --output text 2>/dev/null || true)
+    DEMO_CLIENT=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`TestHarnessClientId`].OutputValue' --output text 2>/dev/null || true)
+    DEMO_TOKEN_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`TestHarnessTokenEndpoint`].OutputValue' --output text 2>/dev/null || true)
+    if [ -n "$DEMO_TOKEN_URL" ] && [ "$DEMO_TOKEN_URL" != "None" ]; then
+        echo "  Get a GATEWAY bearer token for the Test Console. This is a"
+        echo "  machine-to-machine token for the gateway - NOT the Cognito login"
+        echo "  you use for the dashboard, which the console will reject:"
+        echo ""
+        echo "    SECRET=\$(aws cognito-idp describe-user-pool-client --region $REGION \\"
+        echo "      --user-pool-id ${DEMO_POOL} --client-id ${DEMO_CLIENT} \\"
+        echo "      --query 'UserPoolClient.ClientSecret' --output text)"
+        echo "    curl -s -X POST '${DEMO_TOKEN_URL}' \\"
+        echo "      -H 'Content-Type: application/x-www-form-urlencoded' \\"
+        echo "      -d \"grant_type=client_credentials&client_id=${DEMO_CLIENT}&client_secret=\$SECRET&scope=vardoger-gateway/invoke\""
+        echo ""
+        echo "  Paste the access_token into the Test Console's bearer token field."
+        echo ""
+    fi
 fi
 if [ "$NEW_HARNESS" = "true" ]; then
     TH_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \

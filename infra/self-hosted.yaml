@@ -2429,17 +2429,17 @@ Outputs:
     Value: vardoger-echo___echo
 
   TestHarnessTokenEndpoint:
-    Condition: DeployTestHarness
+    Condition: NeedsGatewayAuth
     Description: Cognito token endpoint for the client_credentials exchange.
     Value: !Sub "https://${TestHarnessUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
 
   TestHarnessClientId:
-    Condition: DeployTestHarness
+    Condition: NeedsGatewayAuth
     Description: App client id for the token exchange. Secret is NOT an output - read it with describe-user-pool-client.
     Value: !Ref TestHarnessUserPoolClient
 
   TestHarnessUserPoolId:
-    Condition: DeployTestHarness
+    Condition: NeedsGatewayAuth
     Description: Cognito user pool id, needed to read the client secret.
     Value: !Ref TestHarnessUserPool
   DispatcherFunctionArn:

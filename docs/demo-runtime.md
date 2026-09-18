@@ -85,7 +85,28 @@ paste that full URL and **leave the tool name empty** — there are no tools on
 this gateway, and an empty tool name is what selects the plain-POST mode. See
 [Testing that detection actually runs](test-console.md).
 
-Or by hand, with a bearer token from the Cognito client:
+### Getting the gateway bearer token
+
+The Test Console asks for a **Gateway bearer token**. This is a
+machine-to-machine token for the *gateway* — **not** the Cognito login you use
+for the dashboard, which is the natural thing to try and which the gateway
+rejects. `deploy.sh` prints the exact commands; they resolve to:
+
+```bash
+POOL=$(aws cloudformation describe-stacks --stack-name agent-vardoger   --query "Stacks[0].Outputs[?OutputKey=='TestHarnessUserPoolId'].OutputValue" --output text)
+CLIENT=$(aws cloudformation describe-stacks --stack-name agent-vardoger   --query "Stacks[0].Outputs[?OutputKey=='TestHarnessClientId'].OutputValue" --output text)
+TOKEN_URL=$(aws cloudformation describe-stacks --stack-name agent-vardoger   --query "Stacks[0].Outputs[?OutputKey=='TestHarnessTokenEndpoint'].OutputValue" --output text)
+SECRET=$(aws cognito-idp describe-user-pool-client --user-pool-id "$POOL"   --client-id "$CLIENT" --query 'UserPoolClient.ClientSecret' --output text)
+curl -s -X POST "$TOKEN_URL" -H 'Content-Type: application/x-www-form-urlencoded'   -d "grant_type=client_credentials&client_id=$CLIENT&client_secret=$SECRET&scope=vardoger-gateway/invoke"
+```
+
+The outputs are named `TestHarness*` because the Cognito pool is shared with the
+test harness rather than duplicated — both gateways need a JWT issuer. They are
+published whenever either is deployed.
+
+Tokens expire, usually within the hour.
+
+Or by hand, with that same token:
 
 ```bash
 curl -s -X POST "<gateway-url>/agent/invocations" \
