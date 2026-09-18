@@ -314,3 +314,54 @@ class TestNoTempDirectoryIsUsedAfterItIsRemoved:
         removed = set(re.findall(r'rm -rf "\$\{?([A-Z_][A-Z0-9_]*)\}?"', script))
         leaked = sorted(created - removed)
         assert not leaked, f"temp directories never removed: {leaked}"
+
+
+class TestSwitchingIntoTokenModeIssuesAUsableSecret:
+    """A retained secret is only useful if somebody has it.
+
+    "Do not rotate on update" is correct for token -> token: rotating on every
+    redeploy would lock an operator out of a console they were using.
+
+    It is wrong coming from any other mode. The retained AuthSecret is then
+    whatever some earlier deploy generated, and the parameter is NoEcho, so it
+    cannot be read back from the stack by anyone. Going cognito -> token
+    therefore produced a console protected by a credential that exists and that
+    nobody holds — no error, no output, just a locked door.
+    """
+
+    def test_the_previous_auth_mode_is_read_before_deciding(self, script: str) -> None:
+        """The two cases are indistinguishable without it."""
+        assert "PREVIOUS_AUTH_MODE" in script, (
+            "deploy.sh cannot tell a token->token redeploy from a switch into "
+            "token mode, so it reuses a secret nobody has"
+        )
+        assert "ParameterKey=='AuthMode'" in script
+
+    def test_the_secret_is_reused_only_when_already_in_token_mode(
+        self, script: str
+    ) -> None:
+        reuse = script[script.index("AUTH_SECRET_USE_PREVIOUS=1") - 300:]
+        assert '"$PREVIOUS_AUTH_MODE" = "token"' in reuse[:300], (
+            "the secret is reused on any update, including switches into token "
+            "mode where the retained value is unknowable"
+        )
+
+    def test_a_switch_into_token_mode_explains_the_new_secret(
+        self, script: str
+    ) -> None:
+        """Otherwise it reads as an unexplained rotation."""
+        assert "Switched from $PREVIOUS_AUTH_MODE to token auth" in script
+
+    def test_the_secret_is_still_never_printed_when_reused(self, script: str) -> None:
+        """A genuine token->token redeploy must not echo the credential; there
+        is no reason to put it on a terminal again."""
+        start = script.index('elif [ "$AUTH_SECRET_USE_PREVIOUS" = "1" ]')
+        branch = script[script.index("then", start):][:400]
+        #  alone is not enough: $AUTH_SECRET_USE_PREVIOUS starts with the
+        # same characters, so the negative lookahead is what makes this mean
+        # "the secret itself" rather than "any variable named like it".
+        leaked = re.search(r"\$AUTH_SECRET(?![A-Z_])", branch)
+        assert not leaked, (
+            f"the retained secret is echoed on a plain redeploy: "
+            f"{branch[max(0, leaked.start() - 60):leaked.end() + 20]!r}"
+        )

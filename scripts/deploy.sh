@@ -126,8 +126,21 @@ fi
 AUTH_SECRET="${VARDOGER_AUTH_SECRET:-}"
 AUTH_SECRET_GENERATED=0
 AUTH_SECRET_USE_PREVIOUS=0
+
+# The mode the stack is currently in, which decides whether a retained secret is
+# meaningful. AuthMode is not NoEcho, so it can be read back; AuthSecret cannot.
+PREVIOUS_AUTH_MODE=""
+if [ "$STACK_EXISTS" = "1" ]; then
+    PREVIOUS_AUTH_MODE=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query "Stacks[0].Parameters[?ParameterKey=='AuthMode'].ParameterValue" --output text 2>/dev/null || true)
+fi
+
 if [ "$AUTH_MODE" = "token" ] && [ -z "$AUTH_SECRET" ]; then
-    if [ "$STACK_EXISTS" = "1" ]; then
+    # Keep the existing secret ONLY when the stack is already in token mode.
+    # Coming from cognito or none, the retained value is whatever some earlier
+    # deploy generated -- it exists, nobody has it, and NoEcho means it cannot
+    # be read back. Reusing it hands the operator a locked door.
+    if [ "$STACK_EXISTS" = "1" ] && [ "$PREVIOUS_AUTH_MODE" = "token" ]; then
         AUTH_SECRET_USE_PREVIOUS=1
     else
         # Reuse the interpreter resolved above; `openssl` is not reliably
@@ -521,7 +534,16 @@ echo ""
 if [ "$AUTH_MODE" = "token" ]; then
     echo "Auth: token mode. Every API request must send:"
     echo "    Authorization: Bearer <secret>"
-    if [ "$AUTH_SECRET_GENERATED" = "1" ]; then
+    if [ "$AUTH_SECRET_GENERATED" = "1" ] && [ -n "$PREVIOUS_AUTH_MODE" ] \
+            && [ "$PREVIOUS_AUTH_MODE" != "token" ]; then
+        echo "  Switched from $PREVIOUS_AUTH_MODE to token auth, so a NEW secret was"
+        echo "  issued. The old one could not be reused: AuthSecret is NoEcho, so"
+        echo "  nobody can read it back. Save this - it is shown once:"
+        echo ""
+        echo "    $AUTH_SECRET"
+        echo ""
+        echo "  Rotate later by redeploying with VARDOGER_AUTH_SECRET set."
+    elif [ "$AUTH_SECRET_GENERATED" = "1" ]; then
         echo ""
         echo "  A secret was generated for you. SAVE IT NOW — it is not shown again:"
         echo ""
