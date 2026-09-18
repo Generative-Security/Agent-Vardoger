@@ -100,6 +100,21 @@ this one is invoked only when prompts arrive, and **nothing in the template
 schedules a keep-alive**, so a real-time endpoint would sit idle and bill around
 the clock.
 
+**Never deployed a SageMaker endpoint?** Do not start from the snippet below.
+Open the model on the Hugging Face Hub and press **Deploy → Amazon SageMaker**:
+the modal generates a copy-paste-ready SDK snippet for *that* model, with the
+container image already resolved, or offers one-click deployment through
+JumpStart for eligible models.
+
+- [Hugging Face on AWS — Quickstart](https://huggingface.co/docs/sagemaker/en/get-started/quickstart)
+  — the Deploy button flow, both paths, with screenshots.
+- [SageMaker Serverless Inference](https://docs.aws.amazon.com/sagemaker/latest/dg/serverless-endpoints.html)
+  — AWS's own reference for the endpoint type this guide recommends.
+
+Take the generated snippet and change one thing: add the
+`serverless_inference_config` shown below, since the Hub's default is a
+real-time endpoint.
+
 The SageMaker Python SDK resolves the container image for you, which is the part
 that is easy to get wrong by hand:
 
@@ -123,6 +138,9 @@ model = HuggingFaceModel(
 model.deploy(
     endpoint_name="vardoger-tier2",
     serverless_inference_config=ServerlessInferenceConfig(
+        # Must be one of 1024 / 2048 / 3072 / 4096 / 5120 / 6144, and at least
+        # as large as the model. Max concurrency can go to 200; 5 is plenty for
+        # a test and caps the damage if something loops.
         memory_size_in_mb=4096, max_concurrency=5,
     ),
 )
