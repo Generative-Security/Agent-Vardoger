@@ -16,20 +16,36 @@ DEMO_RUNTIME="${VARDOGER_DEMO_RUNTIME:-false}"          # self-managed demo agen
 # and this is overwritten from the outputs before the second pass.
 AGENT_RUNTIME_ARN_EFFECTIVE="${VARDOGER_AGENT_RUNTIME_ARN:-}"
 
-if [ "$NEW_HARNESS" != "true" ] && [ -z "${VARDOGER_GATEWAY_ARN:-}" ]; then
+# A gateway ARN is required only when the stack is not building one. BOTH
+# self-contained modes build their own, so either one satisfies this.
+if [ "$NEW_HARNESS" != "true" ] && [ "$DEMO_RUNTIME" != "true" ] \
+        && [ -z "${VARDOGER_GATEWAY_ARN:-}" ]; then
     echo "ERROR: VARDOGER_GATEWAY_ARN is required"
     echo "Usage: export VARDOGER_GATEWAY_ARN='arn:aws:bedrock-agentcore:...' && $0"
     echo ""
-    echo "  No gateway yet? Build one with the stack instead:"
-    echo "    export VARDOGER_NEW_HARNESS=true"
-    echo "  See docs/test-harness.md."
+    echo "  No gateway yet? The stack can build one for you. Two topologies:"
+    echo ""
+    echo "    export VARDOGER_DEMO_RUNTIME=true    # gateway IN FRONT of a"
+    echo "                                         # self-managed runtime."
+    echo "                                         # Sees raw prompts, and the"
+    echo "                                         # session kill works here."
+    echo "                                         # See docs/demo-runtime.md"
+    echo ""
+    echo "    export VARDOGER_NEW_HARNESS=true     # gateway BEHIND an agent."
+    echo "                                         # Sees tool calls. AWS refuses"
+    echo "                                         # StopRuntimeSession on a"
+    echo "                                         # harness-managed runtime, so"
+    echo "                                         # the kill cannot be shown."
+    echo "                                         # See docs/test-harness.md"
     exit 1
 fi
 
-# Authoritative for StopRuntimeSession, so it is required whenever a real
-# agent is being protected. The test harness has no runtime of its own: its
-# gateway fronts an echo Lambda, and there is no session to terminate.
-if [ "$NEW_HARNESS" != "true" ] && [ -z "${VARDOGER_AGENT_RUNTIME_ARN:-}" ]; then
+# Authoritative for StopRuntimeSession, so it is required whenever a real agent
+# is being protected. Neither self-contained mode needs it supplied: the test
+# harness has no runtime of its own (its gateway fronts an echo Lambda), and the
+# demo mode creates one, whose ARN deploy.sh reads back on the second pass.
+if [ "$NEW_HARNESS" != "true" ] && [ "$DEMO_RUNTIME" != "true" ] \
+        && [ -z "${VARDOGER_AGENT_RUNTIME_ARN:-}" ]; then
     echo "ERROR: VARDOGER_AGENT_RUNTIME_ARN is required"
     echo "  (not required when VARDOGER_NEW_HARNESS=true)"
     exit 1

@@ -318,3 +318,49 @@ class TestTheKillGrantIsScopedToTheDemoRuntime:
             "the harness runtime ARN is read after the demo one and would "
             "overwrite it, scoping the kill to a runtime that cannot be stopped"
         )
+
+
+class TestThePreconditionsKnowAboutBothModes:
+    """A mode that builds its own gateway must not be asked for one.
+
+    Both guards tested only NEW_HARNESS, so VARDOGER_DEMO_RUNTIME=true was
+    refused for want of a gateway ARN and a runtime ARN — both of which that
+    mode creates itself. Adding a second self-contained topology without
+    updating the checks that exist to detect the absence of infrastructure.
+
+    The operator sees this before anything else happens, and the message told
+    them to use the harness: the one topology where the session kill, which is
+    why the demo exists, cannot be demonstrated.
+    """
+
+    SCRIPT = DEPLOY_SH.read_text(encoding="utf-8")
+
+    def test_the_gateway_guard_accepts_either_self_contained_mode(self) -> None:
+        guard = self.SCRIPT[self.SCRIPT.index("VARDOGER_GATEWAY_ARN is required") - 400:]
+        assert '[ "$DEMO_RUNTIME" != "true" ]' in guard[:400], (
+            "the gateway precondition ignores DEMO_RUNTIME, so a mode that "
+            "builds its own gateway is refused for not having one"
+        )
+
+    def test_the_runtime_guard_accepts_either_self_contained_mode(self) -> None:
+        guard = self.SCRIPT[self.SCRIPT.index("VARDOGER_AGENT_RUNTIME_ARN is required") - 400:]
+        assert '[ "$DEMO_RUNTIME" != "true" ]' in guard[:400], (
+            "the runtime precondition ignores DEMO_RUNTIME, which creates a "
+            "runtime and reads its ARN back on the second pass"
+        )
+
+    def test_the_error_message_offers_both_topologies(self) -> None:
+        """Offering only the harness sends an operator to the one place the
+        session kill cannot be shown."""
+        start = self.SCRIPT.index("VARDOGER_GATEWAY_ARN is required")
+        message = self.SCRIPT[start:start + 1600]
+        assert "VARDOGER_DEMO_RUNTIME=true" in message
+        assert "VARDOGER_NEW_HARNESS=true" in message
+
+    def test_the_mode_flags_are_assigned_before_the_guards_read_them(self) -> None:
+        """Under `set -u` an unassigned variable aborts the deploy outright."""
+        assign = self.SCRIPT.index('DEMO_RUNTIME="${VARDOGER_DEMO_RUNTIME:-false}"')
+        first_use = self.SCRIPT.index('[ "$DEMO_RUNTIME" != "true" ]')
+        assert assign < first_use, (
+            "DEMO_RUNTIME is read by a precondition before it is assigned"
+        )
