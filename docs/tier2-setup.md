@@ -280,6 +280,41 @@ Confirm the model is classifying your traffic sensibly before giving it the kill
 > parameter — it is a code default, changeable only on the deployed function's
 > configuration.
 
+#### What the thresholds actually gate
+
+`0.85` is not the number that decides a kill. It decides whether a label counts
+as an attack at all. Killing is gated separately, and much harder:
+
+| Gate | Default | Meaning |
+|---|---|---|
+| `VARDOGER_ML_SUSPICIOUS_THRESHOLD` | `0.55` | Below this, the verdict is not even recorded as suspicious |
+| `VARDOGER_ML_CONFIDENCE_THRESHOLD` | `0.85` | Below this, an attack label is not treated as an attack |
+| `tier2_default_kill_threshold` | `0.97` | Confidence needed before a kill is considered |
+| `tier2_min_malicious_verdicts_for_kill` | `2` | One malicious verdict is not enough |
+| `tier2_allow_single_verdict_kill_threshold` | `0.99` | …unless confidence is this high |
+| `session_kill_score_threshold` | `120.0` | Accumulated Tier 2 session score needed |
+
+The last four are **scope policy**, set through the dashboard, not environment
+variables. A live run logs the one that stopped it, e.g.
+`threshold=kill_denied:0.97`.
+
+So tuning `0.85` to make Tier 2 more or less willing to kill changes the wrong
+number. It changes what gets *counted*; the kill gates are separate and stricter.
+
+#### Tier 2 scores the session window, not the prompt
+
+`_build_ml_input` joins up to `VARDOGER_SESSION_CONTEXT_MAX` (default `10`)
+earlier prompts onto the current one before sending it to the model. That is
+deliberate — it is how multi-turn escalation is detected, where no single turn
+is damning.
+
+The consequence surprises people reading logs: **once an attack is in the
+window, later turns in that session also classify as an attack**, often at very
+high confidence. Three consecutive `label=INJECTION confidence=1.000` lines in
+one session is normally the window doing its job, not the model flagging three
+separate attacks. To judge the model on individual prompts, look at a fresh
+session id.
+
 #### If the label never matches
 
 The handler uppercases the label and checks it against `ATTACK_LABELS`
