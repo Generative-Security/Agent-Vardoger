@@ -909,6 +909,14 @@ Resources:
               - Effect: Allow
                 Action: securityhub:BatchImportFindings
                 Resource: "*"
+              # The alert Lambda IS the kill in sidecar mode, and it records
+              # what StopRuntimeSession actually returned. Without this the
+              # write is denied, the outcome silently stays "deferred", and a
+              # successful kill is indistinguishable from one still in flight —
+              # which is precisely the ambiguity recording it exists to remove.
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !GetAtt SessionRegistryTable.Arn
       Tags:
         - Key: Application
           Value: AgentVardoger
