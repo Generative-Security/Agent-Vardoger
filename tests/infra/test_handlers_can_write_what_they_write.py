@@ -4,7 +4,7 @@ This shipped twice in one project. The most recent: `record_kill_outcome` was
 added to the alert Lambda, whose role had no DynamoDB permissions at all. The
 kill itself succeeded —
 
-    Session terminated: runtime_session_id=test-console-1af5c678-... 
+    Session terminated: runtime_session_id=test-console-1af5c678-...
 
 — but the write-back was denied, so the session registry kept `kill_outcome:
 "deferred"` forever. A successful kill and one still in flight became
