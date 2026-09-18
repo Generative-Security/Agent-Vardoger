@@ -150,7 +150,14 @@ for the S3 buckets, which must be emptied before the stack itself is deleted.
 
 ## Status
 
-**Not yet deployed.** The resources are schema-checked against the
-CloudFormation reference and covered by tests, and the agent has been run and
-exercised over HTTP locally — but nothing here has been created in AWS. The
-first deploy is the real test.
+**Verified end to end, 2026-09-18.** Deployed, and the full sequence confirmed
+through the Test Console:
+
+```
+Session terminated: runtime_session_id=test-console-1af5c678-62f9-49ed-b274-8e9a600e182a
+reason=Security detection
+```
+
+This is the first confirmed `StopRuntimeSession` success in the project. On the
+[test harness](test-harness.md) it is impossible — AgentCore refuses the call —
+so this topology is what makes the session kill demonstrable at all.
