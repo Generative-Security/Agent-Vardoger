@@ -273,7 +273,12 @@ echo "  Uploaded $CODE_S3_KEY"
 # the package is just that file zipped -- no pip install and no arm64 wheels.
 DEMO_AGENT_S3_KEY="vardoger-demo-agent.zip"
 if [ "$DEMO_RUNTIME" = "true" ]; then
-    "$PYTHON_BIN" - "$PROJECT_ROOT/infra/demo_agent/main.py" "$BUILD_DIR/demo-agent.zip" <<'PYZIPDEMO'
+    # Its OWN build directory. BUILD_DIR belongs to the Lambda build and is
+    # removed as soon as that upload finishes, so borrowing it made this
+    # dependent on statement order in a way nothing would have caught until it
+    # ran -- which is exactly how it broke.
+    DEMO_BUILD_DIR=$(mktemp -d)
+    "$PYTHON_BIN" - "$PROJECT_ROOT/infra/demo_agent/main.py" "$DEMO_BUILD_DIR/demo-agent.zip" <<'PYZIPDEMO'
 import sys, zipfile
 src, out = sys.argv[1], sys.argv[2]
 # main.py must sit at the ROOT of the archive: AgentCore resolves the entrypoint
@@ -282,7 +287,7 @@ src, out = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
     zf.write(src, "main.py")
 PYZIPDEMO
-    DEMO_HASH=$("$PYTHON_BIN" - "$BUILD_DIR/demo-agent.zip" <<'PYHASHDEMO'
+    DEMO_HASH=$("$PYTHON_BIN" - "$DEMO_BUILD_DIR/demo-agent.zip" <<'PYHASHDEMO'
 import hashlib, sys
 print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:16])
 PYHASHDEMO
@@ -290,7 +295,8 @@ PYHASHDEMO
     # Hashed key, for the same reason the Lambda package uses one: a fixed key
     # means CloudFormation sees no change and keeps running the old code.
     DEMO_AGENT_S3_KEY="vardoger-demo-agent-${DEMO_HASH}.zip"
-    aws s3 cp "$BUILD_DIR/demo-agent.zip" "s3://$BUCKET_NAME/$DEMO_AGENT_S3_KEY" --quiet
+    aws s3 cp "$DEMO_BUILD_DIR/demo-agent.zip" "s3://$BUCKET_NAME/$DEMO_AGENT_S3_KEY" --quiet
+    rm -rf "$DEMO_BUILD_DIR"
     echo "  Uploaded $DEMO_AGENT_S3_KEY (demo agent)"
 fi
 

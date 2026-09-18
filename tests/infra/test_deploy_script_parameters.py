@@ -256,3 +256,61 @@ class TestTheHarnessSummaryPrintsUsableValues:
             "deploy.sh appends /mcp to a gateway URL that already ends in /mcp, "
             "printing a /mcp/mcp endpoint that 404s"
         )
+
+
+class TestNoTempDirectoryIsUsedAfterItIsRemoved:
+    """A build directory outlives nothing. Using one after `rm -rf` fails at
+    run time only, and only in the mode that reaches that line.
+
+    This shipped: the demo agent packaging landed one line after
+    `rm -rf "$BUILD_DIR"` and wrote into the deleted directory —
+
+        FileNotFoundError: '/tmp/tmp.0v9xBy6ps5/demo-agent.zip'
+
+    — which nothing caught, because the zip logic had been tested in isolation
+    and its PLACEMENT in the script had not. Sharing the directory was the real
+    error: its lifetime belongs to the Lambda build, so anything else depending
+    on it is one reordering away from breaking.
+    """
+
+    @staticmethod
+    def _removal_points(script: str) -> dict[str, int]:
+        return {
+            var: script.index(f'rm -rf "${{{var}}}"')
+            for var in re.findall(r'rm -rf "\$\{?([A-Z_][A-Z0-9_]*)\}?"', script)
+            if f'rm -rf "${{{var}}}"' in script
+        }
+
+    def test_no_variable_is_referenced_after_its_directory_is_removed(
+        self, script: str
+    ) -> None:
+        offenders = []
+        for var, removed_at in self._removal_points(script).items():
+            tail = script[removed_at + 1:]
+            # A later re-assignment starts a fresh lifetime, which is fine.
+            if re.search(rf'^{var}=\$\(mktemp', tail, re.M):
+                continue
+            for match in re.finditer(rf'\$\{{?{var}\}}?/', tail):
+                line = tail[:match.start()].count("\n") + 1
+                offenders.append(f"{var} used {line} lines after its rm -rf")
+        assert not offenders, (
+            f"temp directories used after removal: {offenders}. The reference "
+            "resolves to a path that no longer exists, and only at run time, in "
+            "whichever mode reaches that line."
+        )
+
+    def test_the_demo_agent_builds_in_its_own_directory(self, script: str) -> None:
+        """Explicit, because the generic check above would also pass if the
+        demo packaging were simply moved earlier — which would work today and
+        break again on the next reordering."""
+        assert "DEMO_BUILD_DIR=$(mktemp -d)" in script
+        assert "$BUILD_DIR/demo-agent.zip" not in script
+
+    def test_every_temp_directory_is_cleaned_up(self, script: str) -> None:
+        # Leading whitespace matters: the demo agent's directory is created
+        # inside an `if`, so anchoring at ^ silently excluded it and this guard
+        # passed while the cleanup was missing.
+        created = set(re.findall(r'^\s*([A-Z_][A-Z0-9_]*)=\$\(mktemp -d\)', script, re.M))
+        removed = set(re.findall(r'rm -rf "\$\{?([A-Z_][A-Z0-9_]*)\}?"', script))
+        leaked = sorted(created - removed)
+        assert not leaked, f"temp directories never removed: {leaked}"
