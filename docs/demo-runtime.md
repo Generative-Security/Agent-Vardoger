@@ -137,6 +137,24 @@ observed anywhere else. The outcome is also written to the session registry as
 `kill_outcome`, so it is queryable after the fact rather than only visible in a
 log tail.
 
+Both of those are records Vardoger writes about itself. For a signal that does
+not come from us, read the agent's own log group and confirm the traffic stops:
+
+```bash
+RT_ID=$(aws bedrock-agentcore-control list-agent-runtimes --region us-east-1     --query "agentRuntimes[?contains(agentRuntimeName,'demo')].agentRuntimeId" --output text)
+aws logs tail "/aws/bedrock-agentcore/runtimes/${RT_ID}-DEFAULT" --since 10m --region us-east-1
+```
+
+Invocations for the session should appear up to the triggering prompt and stop
+there. Note what this does and does not show: the gateway sits in front of the
+runtime, so silence proves nothing reached the agent — it does not by itself
+distinguish AWS discarding the session from the gateway refusing to forward. The
+`StopRuntimeSession` success in the alert log is AWS's own answer and is what
+carries that half of the claim.
+
+Blocking later prompts is the property that matters operationally, and these two
+signals together establish it.
+
 ## Teardown
 
 ```bash
