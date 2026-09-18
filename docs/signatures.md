@@ -18,7 +18,7 @@ Shipped with the repository and updated via pull requests:
 
 ## Premium Signatures (AWS Marketplace subscription)
 
-Premium signatures are delivered through an **AWS Marketplace subscription**, not an in-app payment. When you subscribe, your AWS account is granted cross-account read access to an S3 bucket holding the latest premium signatures. Configure the scanner with:
+Premium signatures are delivered through a private **AWS Marketplace subscription**, not an in-app payment. Contact us at [sales@generativesecurity.ai](mailto:sales@generativesecurity.ai) to subscribe. When you subscribe, your AWS account is granted cross-account read access to an S3 bucket holding the latest premium signatures. Configure the scanner with:
 
 - `VARDOGER_PREMIUM_SIGNATURE_BUCKET` — the cross-account bucket name
 - `VARDOGER_PREMIUM_SIGNATURE_PREFIX` — object prefix (default `premium/`)

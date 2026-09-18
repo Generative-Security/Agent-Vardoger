@@ -102,7 +102,7 @@ A third field, **`provenance`** (`dispatcher` / `tier2` / `tier3`), records whic
 
 ## Access Control
 
-The control plane enforces three roles — **viewer** < **operator** < **admin** — via a `require_role` dependency on every protected endpoint. Roles come from a verified Cognito JWT (`cognito:groups` claim). `VARDOGER_AUTH_MODE` selects `none` (local dev, admin), `cognito`, or `cognito+identity-center`. Under `cognito`, the control plane sits behind an API Gateway JWT authorizer; the open Lambda Function URL exists only when auth is `none`.
+The control plane enforces three roles — **viewer** < **operator** < **admin** — via a `require_role` dependency on every protected endpoint. Roles come from a verified Cognito JWT (`cognito:groups` claim). `VARDOGER_AUTH_MODE` selects `token` (the default: a single shared bearer secret, caller treated as admin), `cognito` / `cognito+identity-center` (team RBAC), or `none` (local dev, open, caller treated as admin). Under the cognito modes the control plane sits behind an API Gateway JWT authorizer; `token` and `none` are served over the Lambda Function URL. Role capabilities are listed in [quickstart.md](quickstart.md#4-authentication-default-token).
 
 ## Cost Attribution
 
