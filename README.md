@@ -18,6 +18,24 @@ Each tier is ordered by the evidence it needs: Tier 1 acts instantly on cheap ce
 
 > **One limitation worth knowing up front:** AgentCore does not permit stopping a session on a **harness-managed** runtime, and publishes no harness equivalent of the API. On those, Vardøger still detects, still accumulates session risk, and still refuses further prompts through the gateway — but the runtime keeps running, so containment is tool denial rather than session termination. Self-managed runtimes, the production shape, are unaffected. See [where the runtime kill does not apply](docs/capabilities.md#where-the-runtime-kill-does-not-apply).
 
+## Alongside Amazon Bedrock Guardrails
+
+[Bedrock Guardrails](https://aws.amazon.com/bedrock/guardrails/) and Agent Vardøger solve adjacent problems, and you should run both. Guardrails filters content at the model; Vardøger watches the session Guardrails cannot see.
+
+| | Bedrock Guardrails | Agent Vardøger (Tier 1) |
+|---|---|---|
+| **Boundary** | model input and output | agent gateway — tool calls, or raw prompts in front of the runtime |
+| **Memory** | each request judged on its own | decayed session risk carried across turns |
+| **Response** | blocks or masks the message; the conversation continues | terminates the session |
+
+Three gaps this closes:
+
+**Guardrails sees the model; Vardøger sees the agent.** A guardrail attached to `InvokeModel` inspects what reaches the model. It does not see the tool calls the agent then makes through its gateway. In the MCP topology that traffic is exactly what Vardøger inspects.
+
+**A blocked message is not a stopped attacker.** Guardrails refuses the offending turn and the session survives, so probing can continue indefinitely at no cost. Vardøger's tiers all converge on one lever — ending the session — which takes away the accumulated context the attacker was building.
+
+**Slow escalation crosses no single line.** Guardrails evaluates each request independently by design. An attacker who stays under the threshold every turn is invisible to it. Vardøger accumulates risk across the session with a 15-minute half-life, so a paced campaign still reaches the block threshold even when no individual prompt would.
+
 ## The Scope and Source Model
 
 Agent Vardøger separates identity into two independent axes (see [DESIGN-DECISIONS.md](DESIGN-DECISIONS.md) for the full rationale):
