@@ -133,6 +133,20 @@ The default is ungated and Apache-2.0, so it works on first run. Anything gated
 — Llama Prompt Guard 2 included — needs you to accept its licence on
 huggingface.co and supply a token.
 
+> **A larger model needs a quota increase first.** The default account limit for
+> *Memory size in MB per serverless endpoint* is **3072 MB**, which is what this
+> deploys. Asking for more without raising the quota fails the endpoint and
+> rolls the stack back:
+>
+> ```
+> The account-level service limit 'Memory size in MB per serverless endpoint'
+> is 3072 MBs ... request delta of 4096 MBs
+> ```
+>
+> Raise it in **Service Quotas → Amazon SageMaker**, then set
+> `Tier2ModelMemoryMB` on the stack. Memory must be at least the model's size,
+> so this bites on bigger classifiers, not on the default.
+
 > **Which model actually matters here.** The default proves the wiring and is
 > reasonable in shadow mode. Before enabling Tier 2 kills, read
 > [Recommended: Llama Prompt Guard 2](#recommended-llama-prompt-guard-2) — a

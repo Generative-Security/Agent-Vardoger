@@ -146,11 +146,13 @@ Parameters:
       https://github.com/aws/deep-learning-containers/blob/master/available_images.md
   Tier2ModelMemoryMB:
     Type: Number
-    Default: 4096
+    Default: 3072
     AllowedValues: [1024, 2048, 3072, 4096, 5120, 6144]
     Description: >
       Serverless memory. Must be at least as large as the model; SageMaker
-      allocates vCPU proportionally.
+      allocates vCPU proportionally. The default account quota for "Memory size
+      in MB per serverless endpoint" is 3072, so anything higher needs a Service
+      Quotas increase first or the endpoint fails with ServiceLimitExceeded.
   Tier2ModelMaxConcurrency:
     Type: Number
     Default: 5

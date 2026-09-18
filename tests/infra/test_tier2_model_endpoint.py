@@ -105,3 +105,20 @@ def test_default_model_is_ungated(template: dict) -> None:
         f"{default} is gated; it cannot be the default for a path documented as "
         "working on first run with no Hugging Face token"
     )
+
+
+def test_default_memory_fits_the_default_account_quota(template: dict) -> None:
+    """A default above the account quota fails on first run for everyone.
+
+    The default quota for "Memory size in MB per serverless endpoint" is 3072.
+    Defaulting to 4096 produced ServiceLimitExceeded on a fresh account, which
+    rolls the whole stack back -- the one-flag path failing in exactly the case
+    it exists to serve. Larger values remain selectable for anyone who has
+    raised the quota; they just cannot be the default.
+    """
+    default = template["Parameters"]["Tier2ModelMemoryMB"]["Default"]
+    assert default <= 3072, (
+        f"default serverless memory is {default} MB but the default account "
+        "quota is 3072 MB; the endpoint would fail with ServiceLimitExceeded "
+        "on any account that has not requested an increase"
+    )
