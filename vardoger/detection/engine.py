@@ -129,10 +129,24 @@ class DetectionEngine:
         risk_assessment = risk_scoring.assess_risk(norm.corrected_prompt)
 
         # Step 6: Accumulate session-level risk
+        #
+        # Feed the stronger of the pattern and policy scores, not the pattern
+        # score alone. The policy layer can return decision="allow" with a score
+        # of 4-7 -- the safe-intent gate does exactly that -- so a prompt can be
+        # let through while the policy rated it medium risk. Accumulating only
+        # the pattern score discarded that rating, and repeated over several
+        # turns it is the difference between crossing SESSION_BLOCK_THRESHOLD
+        # and never crossing it: the slow-escalation case this tier exists for.
+        #
+        # Signature and hash scores are deliberately NOT included. Any match
+        # there sets is_malicious on its own, so the session is terminated
+        # regardless of what accumulated; folding them in would inflate session
+        # scores without catching anything new, and would raise false-positive
+        # kills on sessions that contain one strong but isolated hit.
         session_risk: dict[str, Any] = {}
         if session_id:
             session_risk = risk_scoring.score_session_risk(
-                risk_assessment["score"],
+                max(risk_assessment["score"], policy_result.risk_score),
                 risk_assessment["intent_categories"],
                 session_state=session_state,
             )
