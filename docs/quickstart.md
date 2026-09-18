@@ -33,7 +33,8 @@
   macOS; on Windows run it from **Git Bash** or **WSL**. Make sure `aws` and
   `pip3` resolve *inside that shell* — a tool installed for PowerShell is not
   necessarily on Git Bash's PATH. The script preflights both and stops with a
-  clear message if either is missing.
+  clear message if either is missing. Using **AWS CloudShell** works well if you
+  want a virtual environment that has most of the stuff you need already.
 - Node.js 20+ and npm — optional (CI builds on 22; Node 18 is end-of-life). Only needed to build the dashboard frontend;
   `deploy.sh` builds it automatically when `npm` is on PATH and prints manual
   instructions otherwise, so a missing `npm` never fails the deploy.
