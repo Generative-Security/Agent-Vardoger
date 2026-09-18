@@ -71,21 +71,129 @@ traffic.
 
 ### Deployment
 
-```bash
-# Deploy to SageMaker
-aws sagemaker create-model ...
-aws sagemaker create-endpoint-config ...
-aws sagemaker create-endpoint --endpoint-name your-model-name ...
+Ordered cheapest-first. Step 0 costs nothing and tells you whether a model will
+help at all.
 
-# Configure Agent Vardøger, then redeploy
-export VARDOGER_ML_ENDPOINT="your-model-name"
-export VARDOGER_TIER2_KILL_ENABLED="false"   # shadow mode; this is the default
-./scripts/deploy.sh
+#### Step 0 — confirm the pipeline before paying for a model
+
+Tier 2 already runs without an endpoint: it consumes the prompt queue and writes
+`PromptHistory`. If rows are not appearing, attaching a model fixes nothing —
+the queue, the function or its permissions are the problem.
+
+```bash
+aws dynamodb scan --table-name VardogerPromptHistory --region us-east-1 \
+  --max-items 5 --output table \
+  --query "Items[].{scope:scope_id.S,ts:session_timestamp.S,status:tier2_status.S}"
 ```
 
-Those are the two that `deploy.sh` reads. Tier 2 starts in shadow mode on its
-own — `VARDOGER_TIER2_KILL_ENABLED` defaults to `false`, so Tier 2 scores and
-records without terminating anything until you set it to `true`.
+Rows appearing at all is the signal. With no endpoint attached, Tier 2 records
+each prompt and marks it `tier2_no_endpoint` in the outcome ledger rather than
+classifying it — that is Tier 2 working correctly, and it is the state a default
+deploy is in. **No rows means the queue, the function or its permissions are
+broken, and a model will not fix it.**
+
+#### Step 1 — deploy the model to a **serverless** endpoint
+
+Use [SageMaker Serverless Inference](https://docs.aws.amazon.com/sagemaker/latest/dg/serverless-endpoints.html),
+not a real-time endpoint. A real-time endpoint bills for every hour it exists;
+this one is invoked only when prompts arrive, and **nothing in the template
+schedules a keep-alive**, so a real-time endpoint would sit idle and bill around
+the clock.
+
+The SageMaker Python SDK resolves the container image for you, which is the part
+that is easy to get wrong by hand:
+
+```python
+# pip install sagemaker
+from sagemaker.huggingface import HuggingFaceModel
+from sagemaker.serverless import ServerlessInferenceConfig
+
+model = HuggingFaceModel(
+    env={
+        # Ungated and Apache-2.0, so no HF token and no licence acceptance.
+        "HF_MODEL_ID": "protectai/deberta-v3-base-prompt-injection-v2",
+        "HF_TASK": "text-classification",
+    },
+    role="arn:aws:iam::<account>:role/<SageMakerExecutionRole>",
+    transformers_version="4.37.0",   # confirm against the current DLC list
+    pytorch_version="2.1.0",
+    py_version="py310",
+)
+
+model.deploy(
+    endpoint_name="vardoger-tier2",
+    serverless_inference_config=ServerlessInferenceConfig(
+        memory_size_in_mb=4096, max_concurrency=5,
+    ),
+)
+```
+
+**Which model.** [Llama Prompt Guard 2](#recommended-llama-prompt-guard-2) above
+is the better choice for production. For a first integration test, the ProtectAI
+DeBERTa classifier is easier: it is ungated, needs no Hugging Face token, and is
+Apache-2.0, so there is no licence to read before you can see a label come back.
+It returns `INJECTION` / `SAFE`, and `INJECTION` is already in `ATTACK_LABELS`.
+
+**Version pins drift.** The `transformers_version` / `pytorch_version` pair must
+match a published Deep Learning Container. If `deploy()` fails resolving an
+image, check the
+[available DLCs](https://github.com/aws/deep-learning-containers/blob/master/available_images.md)
+and adjust.
+
+#### Step 2 — point Vardøger at the endpoint
+
+```bash
+aws cloudformation update-stack --stack-name agent-vardoger --region us-east-1 \
+  --use-previous-template --capabilities CAPABILITY_NAMED_IAM \
+  --parameters ParameterKey=Tier2MlEndpoint,ParameterValue=vardoger-tier2 \
+    $(aws cloudformation describe-stacks --stack-name agent-vardoger --region us-east-1 \
+      --query "Stacks[0].Parameters[?ParameterKey!='Tier2MlEndpoint'].ParameterKey" \
+      --output text | tr '\t' '\n' | sed 's/.*/ParameterKey=&,UsePreviousValue=true/')
+```
+
+A parameter update takes 2–3 minutes and skips repackaging the Lambdas and
+rebuilding the frontend. `./scripts/deploy.sh` with `VARDOGER_ML_ENDPOINT` set
+works too and is the right choice if you are also changing code.
+
+> **The endpoint name is a deploy parameter, so it can be silently unset.**
+> Running `deploy.sh` later *without* `VARDOGER_ML_ENDPOINT` exported re-applies
+> the empty default, which disables Tier 2 classification and removes the
+> SageMaker permission. Nothing fails; prompts simply go back to
+> `tier2_no_endpoint`. Export it in any shell you deploy from.
+
+Setting the endpoint is what grants `sagemaker:InvokeEndpoint`, scoped to exactly
+that endpoint ARN. With no endpoint configured the permission is not granted at
+all.
+
+#### Step 3 — verify a real classification
+
+Send a benign prompt and an attack through your gateway, then read the Tier 2
+log:
+
+```bash
+aws logs tail /aws/lambda/vardoger-tier2-ml --since 5m --region us-east-1
+```
+
+You are looking for a label and a confidence. Then confirm it reached storage:
+
+```bash
+aws dynamodb scan --table-name VardogerPromptHistory --region us-east-1 \
+  --max-items 5 --output table \
+  --query "Items[].{label:tier2_label.S,conf:tier2_confidence.N,status:tier2_status.S,cat:tier2_category.S}"
+```
+
+`tier2_label` and `tier2_confidence` are the model's own output. `tier2_status`
+and `tier2_category` are what the scoring pipeline made of it.
+
+**A slow first classification is expected, not a fault.** Serverless endpoints
+scale to zero and nothing keeps this one warm, so the first invocation after an
+idle period pays a cold start. Tier 2 is asynchronous and its lever is ending the
+session rather than refusing a prompt, so this delays a kill — it never delays a
+user's answer.
+
+**Keep kills off until the labels look right.** `VARDOGER_TIER2_KILL_ENABLED`
+defaults to `false`, so Tier 2 scores and records without terminating anything.
+Confirm the model is classifying your traffic sensibly before giving it the kill.
 
 > **Not `VARDOGER_ML_KILL_ENABLED`.** That name is the *Lambda's* environment
 > variable, which the template sets from `VARDOGER_TIER2_KILL_ENABLED`.
@@ -93,6 +201,20 @@ records without terminating anything until you set it to `true`.
 > `VARDOGER_ML_CONFIDENCE_THRESHOLD` (default `0.85`) is likewise not a deploy
 > parameter — it is a code default, changeable only on the deployed function's
 > configuration.
+
+#### If the label never matches
+
+The handler uppercases the label and checks it against `ATTACK_LABELS`
+(`INJECTION`, `JAILBREAK`, `PROMPT_INJECTION`, `MALICIOUS`, `ATTACK`, `LABEL_1`,
+`1`, and the abuse families). A model whose positive class is none of those
+scores as benign, silently.
+
+A response shape the handler cannot parse does **not** raise. It degrades to
+`SAFE` with score `0` and reports a degraded component, because an external
+endpoint returning something unexpected must not turn into retry-to-DLQ churn.
+So "everything is SAFE" has two causes worth separating: the model says so, or
+the handler could not read the answer. Check for the degraded report before
+concluding the model is quiet.
 
 ### Testing Your Model
 
