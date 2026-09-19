@@ -16,6 +16,7 @@ from signatures.community.mitre_atlas import ALL_MITRE_ATLAS
 from signatures.community.named_jailbreaks import ALL_COMMUNITY_INTEL
 from signatures.community.zero_day_patterns import ALL_ZERO_DAY
 from vardoger.detection.models import RegexPattern
+from vardoger.health import SIGNATURE_REFRESH, report_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,18 @@ def validate_and_parse(
         sig_id = item.get("id")
         raw_pattern = item.get("pattern")
         if not sig_id or not raw_pattern:
-            continue
+            # Reject the PACKAGE, not just the entry. Every other failure below
+            # returns None, so skipping here was the one path that could ship a
+            # silently smaller package -- a publish with three malformed entries
+            # loaded as a valid package minus three detections, indistinguishable
+            # from one that was published that way. A package applies whole or
+            # not at all; that is the property that stops a bad publish from
+            # semi-corrupting a deployment.
+            logger.error(
+                "Rejecting signature package: entry %s is missing an id or pattern",
+                sig_id or "<no id>",
+            )
+            return None
         try:
             re.compile(raw_pattern)
         except re.error as exc:
@@ -320,6 +332,16 @@ def build_scanner(include_premium: bool = True, include_custom: bool = True) -> 
             "Community signature count dropped: expected %d, present %d",
             len(community_ids),
             community_present,
+        )
+        # The refresh path alarms when the set shrinks; this one only logged,
+        # so the single case that means "the bundled floor itself is gone" was
+        # the quietest of the two. Detection coverage disappearing is the worst
+        # thing this system can do silently.
+        report_degraded(
+            SIGNATURE_REFRESH,
+            "community signature floor shrank during scanner build",
+            expected=len(community_ids),
+            present=community_present,
         )
 
     return SignatureScanner(signatures)
