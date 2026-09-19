@@ -351,6 +351,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             session_id=parsed.session_id,
             tenant_id=parsed.source,
             session_state=session_state,
+            session_authentic=parsed.session_id_is_authentic,
         )
 
         # Persist risk state and the decision in a single write. Keeping these

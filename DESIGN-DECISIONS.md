@@ -29,7 +29,7 @@ Detection is split into three tiers with deliberately different latency budgets,
 
 Both modes kill the session; an unrecognized mode value falls back to the strict `gate`.
 
-**Why deterministic and inline:** The inline path has a hard latency budget (sub-30ms target) because it sits in front of live user traffic. Deterministic rules are fast, explainable, and produce zero false negatives on the exact patterns they encode. Operators can read a signature and know precisely what it catches.
+**Why deterministic and inline:** The inline path has a hard latency budget (sub-30ms target) because it sits in front of live user traffic. The budget is **per prompt length, not absolute**: cost is linear in the text scanned, so it holds comfortably for chat-length turns and is exceeded by large documents (measured numbers in [docs/capabilities.md](docs/capabilities.md#measured-latency)). Deterministic rules are fast, explainable, and produce zero false negatives on the exact patterns they encode. Operators can read a signature and know precisely what it catches.
 
 **Expected outcome:** Obvious, high-confidence attacks (direct injection, known jailbreaks, credential extraction) terminate the session instantly with no dependency on any external service or model — while a false positive, in the default sidecar mode, degrades to at most one answered prompt rather than a refused user.
 
@@ -94,7 +94,20 @@ Scope and source identity are read only from gateway-asserted sources (deploy-ti
 
 **Why:** If a caller could set its own identity, it could attribute its prompts to another source, be scored against another source's risk state, or — under the managed service — select a more permissive scope's policy (for example one running in shadow mode). Identity that the caller controls is not identity; it is a suggestion.
 
-**Expected outcome:** A caller cannot spoof, borrow, or escalate across scope or source boundaries by manipulating the prompt payload.
+**The session identifier is a documented exception.** Scope and source are platform-only, without qualification — those are the axes that decide isolation and policy, and nothing about them is ever read from the payload. The **session id** is different, and the difference is worth stating plainly rather than leaving in a code comment.
+
+The session id is taken from the gateway when the gateway asserts one — an MCP `mcp-session-id` header, or the AgentCore runtime session header. When neither is present, it falls back to `session.id` from the W3C baggage header, which travels in the request body and is therefore **caller-supplied and forgeable**. Every evaluation records which it was, as `session_id_is_authentic`.
+
+**What we tried first, and why it was not enough.** The intended design was the header alone. Two things forced the fallback:
+
+- **The header does not always arrive.** It reaches the interceptor only when the gateway is configured with `PassRequestHeaders: true`. Without that, the parser sees no header at all — and an operator who misconfigures the gateway gets silence, not an error.
+- **The alternative is worse than a forgeable id.** Deriving a unique synthetic id per prompt makes every turn its own session. Risk accumulation, multi-turn escalation detection and the session kill all become inert, because no two turns of one conversation ever correlate. A forged id can misattribute one prompt to another session; a missing id guarantees that nothing accumulates at all.
+
+So the trade is deliberate: correlation that can be gamed beats correlation that cannot happen. The residual weakness is real — an attacker who controls baggage can send each malicious prompt under a fresh id, so risk never accumulates and the "refuse the next prompt" guard never fires.
+
+**Known gap:** `session_id_is_authentic` is recorded and logged but does not yet change enforcement posture. Making an inauthentic session force gate mode, or simply carry additional risk, would make forging cost the attacker the answer. That change is open, not done.
+
+**Expected outcome:** A caller cannot spoof, borrow, or escalate across **scope or source** boundaries by manipulating the prompt payload. Session correlation is best-effort where the platform does not assert an identifier, and says so in every record.
 
 ---
 
@@ -200,7 +213,15 @@ The detection core knows nothing about AWS, AgentCore, or any specific gateway. 
 
 The repository ships a solid base of community signatures — MITRE ATLAS patterns, named public jailbreaks, tokenizer injection, encoding attacks. The free tier can view every bundled signature and author its own custom signatures. Premium intelligence (curated social-engineering patterns, business-logic-abuse patterns, rapid-response updates, the tuned ML model) is delivered as a subscription.
 
-**How premium is delivered — AWS Marketplace cross-account S3:** Rather than an in-app payment flow, premium is an **AWS Marketplace subscription**. When a customer subscribes, their AWS account is granted cross-account **read** access to an S3 bucket that holds the latest premium signatures. The scanner gains an optional S3 provider (`VARDOGER_PREMIUM_SIGNATURE_BUCKET`, with an optional `VARDOGER_PREMIUM_SIGNATURE_ROLE_ARN` to assume): when configured, it loads and validates premium signatures through the *same* pipeline as community ones (ReDoS screen, minimum-pattern floor, optional manifest-hash integrity check) and merges them in, premium overriding community on id collision. Premium is strictly additive and optional — if the bucket is unset or a load fails, the scanner degrades silently to the community-only set. The Signatures page surfaces premium status, a Marketplace link, and the customer's AWS account id; there is no in-app billing.
+**How premium is delivered — AWS Marketplace cross-account S3:** Rather than an in-app payment flow, premium is an **AWS Marketplace subscription**. When a customer subscribes, their AWS account is granted cross-account **read** access to an S3 bucket that holds the latest premium signatures. The scanner gains an optional S3 provider (`VARDOGER_PREMIUM_SIGNATURE_BUCKET`, with an optional `VARDOGER_PREMIUM_SIGNATURE_ROLE_ARN` to assume): when configured, it loads and validates premium signatures through the *same* pipeline as community ones (ReDoS screen, minimum-pattern floor, optional manifest-hash integrity check) and **appends** them. Premium is strictly additive and optional — if the bucket is unset or a load fails, the scanner degrades silently to the community-only set. The Signatures page surfaces premium status, a Marketplace link, and the customer's AWS account id; there is no in-app billing.
+
+**Why premium cannot override community — the community floor:** Merging is **append-only**. A premium or custom signature may introduce a new id, but it may never replace a bundled community id; attempts are dropped and logged. This was a deliberate reversal of the original "premium wins" design.
+
+The reason is that premium content arrives from a **remote bucket** and custom content from an operator's own table — neither is in the repository, and neither is reviewed by the people who review community signatures. If either could claim an existing id, a compromised feed, a bad publish or a careless custom rule could **silently disable a bundled detection** by shipping the same id with a weaker pattern. Nothing would fail; the scanner would simply stop catching something it used to catch.
+
+Append-only means the bundled set is a floor that remote content can raise and never lower. It is the same instinct as the ReDoS screen and the minimum-pattern check: content from outside the repository is held at arm's length, and the safe failure is *more* detection, not less.
+
+The cost is that a premium feed cannot fix a bad community signature in place — it has to ship a new id, and the community one has to be corrected by pull request. That is the right trade: correcting a bundled signature should be visible and reviewed, not delivered silently through a paid channel.
 
 **Why this mechanism:** Marketplace handles billing, entitlement, and procurement through a channel enterprise buyers already trust, while a cross-account bucket policy is a simple, auditable grant that requires no secret-sharing and no bespoke license server. Reusing the community validation pipeline means premium content is held to the identical safety bar.
 

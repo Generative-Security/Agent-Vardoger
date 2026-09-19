@@ -140,6 +140,17 @@ RISK_COMBO_TERMS: list[tuple[list[str], int, str]] = [
 
 # --- Calibrated thresholds. See the module docstring for the rationale. ---
 # Prompt-level verdicts.
+# Added to a prompt's score when the session identifier was not asserted by
+# the gateway. One point, on purpose: enough that a weight-7 tool_injection or a
+# pair of weight-4 signals reaches the block line when we cannot verify who is
+# asking, and not enough to block anything on unverifiability alone. A prompt
+# that scores 0 still scores 0.
+#
+# It does NOT defeat an attacker rotating session ids -- each forged session
+# starts clean either way. What it buys is that traffic we cannot attribute is
+# judged slightly more strictly than traffic we can.
+UNVERIFIED_SESSION_RISK = 1
+
 BLOCK_THRESHOLD = 8
 ESCALATE_THRESHOLD = 4
 # Session-level verdicts (higher: session risk aggregates many prompts).

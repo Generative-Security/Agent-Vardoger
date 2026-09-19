@@ -95,7 +95,7 @@ If you would prefer Agent Vardøger as a managed service, contact us at [sales@g
 
 ## Deploy in 5 Minutes
 
-Stand up the self-hosted stack — interceptor, Tier 1 detection, and the dashboard — in your own AWS account in single-operator mode (no user authentication setup). Tier 2 **ML classification** is optional and off by default, but can be enabled with a single flag (VARDOGER_TIER2_MODEL=true); see [docs/tier2-setup.md](docs/tier2-setup.md). Tier 2 functionality is always deployed, however, to give you prompt history in the dashboard.
+Stand up the self-hosted stack — interceptor, Tier 1 detection, and the dashboard — in your own AWS account in single-operator mode (no user authentication setup). Tier 2 **ML classification** is optional and off by default, but can be enabled with a single flag (VARDOGER_TIER2_MODEL=true); see [docs/tier2-setup.md](docs/tier2-setup.md). Tier 2 functionality is always deployed, however, to give you prompt history in the dashboard. If you'd rather work through the full walkthrough, the [quickstart page](docs/quickstart.md) gives you more detail and further links at each step.
 
 **Prerequisites:** an existing Amazon Bedrock AgentCore Gateway + agent runtime, AWS CLI configured, Python 3.12+, and Node.js 20+ (for the dashboard build).
 

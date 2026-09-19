@@ -105,6 +105,7 @@ class DetectionEngine:
         session_id: str = "",
         tenant_id: str = "",
         session_state: dict[str, Any] | None = None,
+        session_authentic: bool = True,
     ) -> EvaluationResult:
         """Run a prompt through normalize -> regex -> hash -> policy -> risk and return a verdict."""
 
@@ -127,6 +128,17 @@ class DetectionEngine:
 
         # Step 5: Score per-prompt risk
         risk_assessment = risk_scoring.assess_risk(norm.corrected_prompt)
+
+        # A session id the gateway did not assert came from caller-supplied
+        # baggage and is forgeable. That does not make the prompt malicious, so
+        # this adds risk rather than refusing anything: an unattributable caller
+        # gets less benefit of the doubt, and a benign prompt still scores 0.
+        # Applied before session accumulation so the whole pipeline sees one
+        # number rather than two.
+        if not session_authentic and risk_assessment["score"] > 0:
+            risk_assessment = dict(risk_assessment)
+            risk_assessment["score"] += risk_scoring.UNVERIFIED_SESSION_RISK
+            risk_assessment["signals"] = list(risk_assessment["signals"]) + ["session:unverified_identity"]
 
         # Step 6: Accumulate session-level risk
         #
