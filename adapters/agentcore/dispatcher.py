@@ -399,7 +399,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         # attack itself. Evidence storage is the place for content.
         logger.info(
             "Evaluated prompt: decision=%s risk=%s session=%s authentic_session=%s "
-            "source=%s envelope=%s signatures=%s mode=%s",
+            "source=%s envelope=%s signatures=%s risk_signals=%s mode=%s",
             result.decision,
             result.risk_score,
             parsed.session_id,
@@ -407,6 +407,17 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             parsed.source,
             envelope_of(event) or "mcp",
             ",".join(result.matched_signature_ids[:5]) or "-",
+            # WHY a score moved, not just what it is. Without this the extra
+            # point an unverified session carries -- and every other scoring
+            # contribution -- was computed and then discarded, so two identical
+            # prompts could score differently with nothing to explain it.
+            #
+            # Named risk_signals, not signals, because `signatures=` is already
+            # on this line and the two would be a glance apart.
+            #
+            # Safe to log: signals are derived names (risk_group:<group>,
+            # <category>:<rule_id>, fixed combo labels), never caller text.
+            ",".join(result.risk_signals[:5]) or "-",
             config.TIER1_MODE,
         )
 
