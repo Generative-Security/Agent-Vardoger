@@ -12,8 +12,8 @@ repository rather than estimated.
 | **Catches** | known-bad patterns, hashes, policy rules | novel evasion, multi-turn escalation and staged exfiltration | coordinated campaigns across sessions |
 | **Acts** | inline, before the agent replies | ~1 second later | every 5 minutes |
 | **Can refuse a prompt** | only with `Tier1Mode=gate` | no — it terminates the session | no — it terminates the session |
-| **Self-hosted** | on, 92 bundled signatures | deployed; ML optional (bring your own endpoint) | available, **off by default** |
-| **+ signature subscription** | adds the premium feed | same feed, same scanner | unchanged |
+| **Self-hosted** | on, 92 bundled signatures | deployed; ML optional (one flag deploys a basic model) | available, **off by default** |
+| **+ signature subscription** | adds the premium feed | same feed, same scanner | premium categories sharpen correlation; cross-session rule packs coming |
 | **Managed backend** | on | ML hosted for you | hosted, correlates across scopes |
 
 > This table is duplicated verbatim in the project README. Change both together.
@@ -25,11 +25,12 @@ repository rather than estimated.
 | Template | `infra/self-hosted.yaml` (57 resources) | same, plus subscription parameters | `infra/managed-agent.yaml` (15 resources) |
 | Tier 1 inline detection | Yes | Yes | Yes |
 | Tier 2 function | Deployed | Deployed | Runs in the managed backend |
-| Tier 2 ML classification | Only if you attach a SageMaker endpoint | Same | Hosted for you |
+| Tier 2 ML classification | One flag deploys a basic model, or attach your own endpoint | Same | Hosted for you |
 | Tier 3 cross-session | Available, **off by default** | Same | Hosted, cross-scope |
 | Prompt History | Yes | Yes | In the managed dashboard |
 | Dashboard / control plane | CloudFront + Lambda | Same | Managed dashboard |
 | Premium signatures | No | Cross-account S3 | Included |
+| Cross-session rule packs | Author your own | Curated packs (coming) | Included, cross-scope (coming) |
 
 **Tier 3 is not a managed-only feature.** It ships in the self-hosted template
 and is enabled with `Tier3Enabled=true`, deploying a Lambda on a
@@ -39,13 +40,22 @@ prompt history before repeats and bursts separate from ordinary traffic. What
 the managed service adds is *cross-scope* analysis — correlating across
 customers and agents rather than only within your own `scope_id`.
 
-**Tier 3 has no signatures of its own.** It ships no rule set and loads no
-signature module. It reads the `matched_signatures` that Tier 1 already recorded
-on each prompt, applies substring hints (`credential`, `exfil`, `secret`,
-`system_prompt`) to weight findings, and otherwise detects statistically: exact
-hash repeats, SimHash near-duplicates, category and pattern bursts, and
-correlated session-risk spikes. Its findings are labelled synthetically as
-`tier3-<method>`.
+**How Tier 3 is driven.** Tier 3 is an open engine that correlates activity
+across sessions. Today it detects statistically: exact hash repeats, SimHash
+near-duplicates, category and pattern bursts, and correlated session-risk
+spikes. It builds on what Tier 1 has already recorded for each prompt, reading
+the `matched_signatures` and applying hints (`credential`, `exfil`, `secret`,
+`system_prompt`) to weight findings, so every signature you add (community,
+custom, or premium) makes cross-session correlation sharper. Its findings are
+labelled `tier3-<method>`.
+
+The engine is designed to be driven by **cross-session rule packs**:
+declarative rules describing distributed patterns such as enumeration split
+across sessions and locations, business-logic abuse, and cross-session social
+engineering. As with signatures, the engine is open and the content is layered:
+author your own rules, or subscribe to curated, industry-specific packs through
+the same AWS Marketplace channel as premium signatures. Rule packs are on the
+[roadmap](../ROADMAP.md#2-cross-session-rule-packs-open-engine-curated-intelligence).
 
 ## The SLA that matters is time-to-kill
 
@@ -65,8 +75,9 @@ session is refused by the dispatcher regardless of whether the runtime kill has
 landed yet. The deferred `StopRuntimeSession` tears down the live runtime; the
 registry write is what closes the door.
 
-That is why deferring is safe: the window it opens is "the agent finishes
-answering one prompt", not "the attacker gets another turn".
+That is why issuing the runtime kill asynchronously is safe: the most it can
+allow is one answer to the triggering prompt, never another turn for the
+attacker.
 
 ### Where the runtime kill does not apply
 
@@ -116,7 +127,7 @@ also refused.
 
 | `Tier1Mode` | Triggering prompt | Session marked terminated | Runtime kill |
 |---|---|---|---|
-| `sidecar` (default) | passed through and answered | immediately | deferred to the alert queue |
+| `sidecar` (default) | passed through; may be answered | immediately | asynchronous, via the alert queue |
 | `gate` | refused (JSON-RPC error on MCP, HTTP 403 on plain HTTP) | immediately | inline |
 
 Sidecar is the default so that every tier converges on one lever — terminate the
@@ -124,18 +135,23 @@ session — rather than Tier 1 alone owning a second one. A security component
 that is wrong or broken then cannot refuse the agent's traffic; a false positive
 costs one dead session instead of a failed request.
 
-The kill is **deferred** rather than issued inline precisely so the agent can
-finish the answer: a `StopRuntimeSession` fired before the passthrough returns
-would race the response the sidecar just promised to deliver.
+The runtime kill is issued **asynchronously**, through the alert queue, so that
+enforcement never sits in the request path. It is not coordinated with the
+agent's response. Against a slow agent (tool calls, long generations) the kill
+may land before the answer is delivered; against a fast one, the answer may
+complete first. That timing is a byproduct of keeping enforcement out of the
+request path, not a design goal, and reducing the delay between detection and
+kill is a planned performance improvement (see the
+[roadmap](../ROADMAP.md#6-detection-quality-and-scale)).
 
 The trade is real: in sidecar mode a **one-shot** attack ("print every customer
-record") is answered before the kill lands. Choose `gate` when a single
+record") may be answered before the kill lands. Choose `gate` when a single
 successful malicious prompt is itself the loss.
 
 If the alert-queue publish fails, the dispatcher falls back to killing inline
 and emits a degraded metric. The deferred kill has exactly one carrier and no
-retry behind it, so a late answer is accepted in preference to a session that
-was supposed to be terminated and silently never was.
+retry behind it, so an inline kill, even one that interrupts the answer, is preferred to a
+session that was supposed to be terminated and silently never was.
 
 - 92 bundled regex signatures + 6 known-bad hashes
   - 43 MITRE ATLAS-derived (prompt injection, jailbreak, data exfiltration, indirect injection)
@@ -205,6 +221,9 @@ prompt has already been answered.
 
 ### Self-hosting the model
 
+The quickest path is `VARDOGER_TIER2_MODEL=true`, which has the stack build a
+serverless SageMaker endpoint serving a default, ungated prompt-injection
+classifier and point Tier 2 at it. For production,
 [docs/tier2-setup.md](tier2-setup.md) recommends **Llama Prompt Guard 2**
 (86M, or 22M for high volume) rather than fine-tuning a general-purpose encoder.
 It is purpose-built for injection and jailbreak detection and needs no training;
@@ -217,17 +236,17 @@ better trade: latency here delays a kill, not the user's answer.
 
 Note the **512-token limit** shared by these encoders — a long prompt is
 truncated, so an attack in the tail of a large document is not seen unless you
-chunk and score each window. The repo ships no deployment script; you create the
-SageMaker endpoint yourself.
+chunk and score each window. Windowed scoring for long documents is on the
+[roadmap](../ROADMAP.md#6-detection-quality-and-scale).
 
 ## Tier 3 — scheduled, cross-session
 
 **Off by default** (`Tier3Enabled=false`). When enabled it runs every 5 minutes
 (`Tier3Schedule`), 120 s timeout, up to 2,000 prompts per run.
 
-It has **no signature set of its own** — see the note at the top of this
-document. It also depends on Tier 2 running, since Tier 2 is what writes the
-`PromptHistory` rows it reads.
+It is driven by the signatures Tier 1 records and by statistical correlation;
+see the note at the top of this document. It depends on Tier 2 running, since
+Tier 2 is what writes the `PromptHistory` rows it reads.
 
 Correlates across sessions within your scope: exact hash repeats, SimHash
 near-duplicates (Hamming distance ≤ 3), normalized pattern bursts, category
@@ -238,6 +257,22 @@ probing the same data source at once.
 runtime*, not seconds. It is a batch job, not a request-path check.
 
 The managed service extends this across scopes; self-hosted sees only its own.
+
+### Where Tier 3 is going
+
+Tier 3 is evolving from recognizing repeated attacks to recognizing the
+**shape** of an attack spread across sessions, without needing to tie those
+sessions to a single actor. Upcoming capabilities
+([ROADMAP.md](../ROADMAP.md#1-cross-session-pattern-detection)) include:
+
+- **Distributed enumeration.** Sessions that each narrow or binary-search a
+  small slice of a catalog, store, roster, or schedule, and together cover it.
+- **Cross-session rule packs.** Author your own, or subscribe to curated,
+  industry-specific packs.
+- **Longer horizons.** Rolling aggregates over hours and days for low-and-slow
+  campaigns.
+- **Cross-session social engineering.** Pretext rotation and coordinated
+  manipulation across sessions.
 
 ## Enforcement and failure behavior
 
@@ -297,3 +332,9 @@ and existing history stays behind in your tables.
 The managed template wires telemetry **outbound only**. There is no inbound path
 for the managed backend to terminate a session in your account, so from your
 side managed Tier 2/3 are detect-and-alert.
+
+## What's next
+
+Response monitoring, cross-session pattern detection, agent-to-agent
+containment, and additional platform adapters are described in
+[ROADMAP.md](../ROADMAP.md).

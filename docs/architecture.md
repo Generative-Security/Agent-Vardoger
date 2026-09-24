@@ -54,8 +54,9 @@ prompt depends on `Tier1Mode`:
 - **`sidecar`** (default) — the session is terminated and the prompt is passed
   through. Tier 1 holds the same lever as Tier 2 and Tier 3 (kill the session)
   rather than a second one of its own (refuse the call), so a detection
-  component cannot take the agent offline. The triggering prompt may be
-  answered; the next one is refused.
+  component cannot take the agent offline. The runtime kill is issued asynchronously and is not coordinated with the
+  response, so the triggering prompt may or may not be answered before it
+  lands; the next prompt is always refused.
 - **`gate`** — the prompt is additionally refused. Choose this
   when a single successful malicious prompt is unacceptable on its own, such as
   one-shot data exfiltration.
@@ -91,6 +92,12 @@ Scans recent prompt history across sessions:
 - Session risk bursts (many sessions trending high simultaneously)
 - Optional: semantic embedding clusters
 
+Tier 3 is designed to be driven by **cross-session rule packs** (author your own
+or subscribe to curated packs) that describe distributed patterns such as
+enumeration split across sessions and locations. Detection keys on the shape of
+the combined activity rather than on linking sessions to an actor. See
+[../ROADMAP.md](../ROADMAP.md#1-cross-session-pattern-detection).
+
 ## Scope and Source
 
 Records carry two identity axes (full rationale in [../DESIGN-DECISIONS.md](../DESIGN-DECISIONS.md)):
@@ -122,6 +129,18 @@ Every taggable resource carries a consistent tag set — `Application=AgentVardo
 - **Backend-first RBAC**: Every control-plane permission is enforced server-side; the UI only mirrors it
 - **Shadow by default**: Tier 2/3 default to log-only until explicitly set to enforce
 - **Safe intent gates**: Prevents false-positive kills on legitimate business questions
+
+## Direction
+
+The architecture is built to extend in three directions, described in
+[../ROADMAP.md](../ROADMAP.md):
+
+- **Response monitoring**: evaluating agent responses and tool results against
+  conversation intent, feeding the same session-risk model and kill lever.
+- **Agent-to-agent containment**: a session graph of which agents talk to which,
+  over which sessions, so termination can follow a compromise downstream.
+- **More adapters**: Google Agent Gateway, LangGraph, and other frameworks, as
+  new implementations of the existing adapter interfaces.
 
 ## Module Boundaries
 

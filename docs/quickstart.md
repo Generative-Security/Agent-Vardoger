@@ -211,7 +211,8 @@ See [docs/managed-setup.md](managed-setup.md) for connecting to the Agent Vardø
 A default deploy already records prompt history and runs Tier 3 cross-session
 analysis — the Tier 2 function is always deployed because it is what writes
 `PromptHistory`. What is optional is the **model**: without an endpoint each
-prompt is recorded and marked `tier2_no_endpoint` rather than classified.
+prompt is recorded and marked `tier2_no_endpoint` rather than classified. Tier 2 
+**ML classification** can be enabled with a single flag (VARDOGER_TIER2_MODEL=true).
 
 See [docs/tier2-setup.md](tier2-setup.md) for self-hosting a classification model.
 

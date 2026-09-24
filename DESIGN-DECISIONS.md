@@ -24,8 +24,8 @@ Detection is split into three tiers with deliberately different latency budgets,
 
 **Sidecar by default, gate by choice (`VARDOGER_TIER1_MODE`):** a Tier 1 detection *always* kills the session; the two modes differ only in what happens to the triggering prompt.
 
-- **`sidecar` (default)** — the prompt is passed through to the agent and the session is terminated (the kill is handed to the alert queue so it does not race the in-flight answer). The agent may answer this one prompt; it will not answer another on that session. This is deliberate: a security sidecar should not be able to take the agent offline, so every tier converges on one lever — kill the session — rather than Tier 1 alone owning a second one (refuse the call). A false positive costs one dead session, not a refused request.
-- **`gate`** — the prompt is additionally refused with HTTP 403 *and* the session is terminated. The stricter posture, for when a single successful malicious prompt is itself unacceptable — one-shot exfiltration ("print every customer record") would be answered before the kill lands in sidecar mode.
+- **`sidecar` (default)** — the prompt is passed through to the agent and the session is terminated. The session is closed to new prompts immediately, and the runtime kill is issued asynchronously through the alert queue so enforcement never sits in the request path. The kill is not coordinated with the in-flight response: against a slow agent it may land before the answer does, and against a fast one the answer may complete first. That timing is a byproduct of keeping enforcement out of the request path, not a goal, and shortening it is a planned performance improvement. Either way, the agent will not answer another prompt on that session. This is deliberate: a security sidecar should not be able to take the agent offline, so every tier converges on one lever — kill the session — rather than Tier 1 alone owning a second one (refuse the call). A false positive costs one dead session, not a refused request.
+- **`gate`** — the prompt is additionally refused with HTTP 403 *and* the session is terminated. The stricter posture, for when a single successful malicious prompt is itself unacceptable — in sidecar mode, a one-shot exfiltration attempt ("print every customer record") may be answered before the kill lands.
 
 Both modes kill the session; an unrecognized mode value falls back to the strict `gate`.
 
@@ -52,6 +52,8 @@ Both modes kill the session; an unrecognized mode value falls back to the strict
 **Why alert-first, kill-last:** Cross-session heuristics are powerful but can amplify Tier 2 false positives across a whole scope. Tier 3 defaults to writing grouped alerts, and its most speculative signal (session-risk burst) is alert-only by design.
 
 **Expected outcome:** Coordinated and distributed attacks that no single-session view could catch are surfaced, while the risk of a tenant-wide false-positive cascade is contained.
+
+**Where Tier 3 is going:** Tier 3 is designed to grow from recognizing *repeated* attacks to recognizing the *shape* of an attack distributed across sessions, such as enumeration split into small, complementary slices across sessions and locations. Its engine is open; the rules that describe advanced distributed patterns are delivered as cross-session rule packs that operators can author or subscribe to. See "Detect the Pattern, Not the Actor" and "Open Capability, Premium Intelligence" below, and [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -105,7 +107,7 @@ The session id is taken from the gateway when the gateway asserts one — an MCP
 
 So the trade is deliberate: correlation that can be gamed beats correlation that cannot happen. The residual weakness is real — an attacker who controls baggage can send each malicious prompt under a fresh id, so risk never accumulates and the "refuse the next prompt" guard never fires.
 
-**Known gap:** `session_id_is_authentic` is recorded and logged but does not yet change enforcement posture. Making an inauthentic session force gate mode, or simply carry additional risk, would make forging cost the attacker the answer. That change is open, not done.
+**Next step:** `session_id_is_authentic` is recorded on every evaluation today. When a session is considered unverifiable it adds one point of risk to the chain. A minor response is performed now because the system can't yet defeat id rotation. But this lays the groundwork for authenticity-aware enforcement: an operator-selectable posture in which a session whose identifier is not platform-asserted carries additional risk or is handled in gate mode, so forging an id costs the attacker the answer. See [ROADMAP.md](ROADMAP.md#5-stronger-session-identity).
 
 **Expected outcome:** A caller cannot spoof, borrow, or escalate across **scope or source** boundaries by manipulating the prompt payload. Session correlation is best-effort where the platform does not assert an identifier, and says so in every record.
 
@@ -209,7 +211,17 @@ The detection core knows nothing about AWS, AgentCore, or any specific gateway. 
 
 ---
 
-## Design Principle: Signatures as a Community Asset, Intelligence as a Product
+## Design Principle: Signatures as a Community Asset, Intelligence as an add-on
+
+**The rule of thumb:** every detection *engine* is open source, in every tier. What Generative Security may offer is the continuously curated *content* that drives the most advanced detections based on proprietary intelligence gathered. Open source operators can always author their own content for any tier in addition to the community intelligence.
+
+| Tier | Open engine | Open content | Author your own | Premium content |
+|------|-------------|--------------|-----------------|-----------------|
+| Tier 1 | Signature scanner, hashes, policy rules | 92 community signatures | Custom signatures | Premium signature feed |
+| Tier 2 | Classification and session scoring pipeline | Basic self-hosted model | Bring your own model | Tuned model and curated behavioral signals |
+| Tier 3 | Cross-session correlation engine | Statistical campaign detection | Cross-session rules (coming) | Industry-specific cross-session rule packs (coming) |
+
+Cross-session rule packs follow the same model as signatures: declarative rules that describe distributed patterns (enumeration split across sessions and locations, business-logic abuse, cross-session social engineering), loaded through the same validation pipeline and subject to the same append-only floor described below.
 
 The repository ships a solid base of community signatures — MITRE ATLAS patterns, named public jailbreaks, tokenizer injection, encoding attacks. The free tier can view every bundled signature and author its own custom signatures. Premium intelligence (curated social-engineering patterns, business-logic-abuse patterns, rapid-response updates, the tuned ML model) is delivered as a subscription.
 
@@ -263,14 +275,42 @@ Every taggable AWS resource the stack creates carries a consistent base tag set 
 
 ---
 
-## Non-Goals and Known Limitations
+## Design Principle: Detect the Pattern, Not the Actor
 
-Being explicit about what the system does *not* claim to do is part of the design.
+Cross-session detection deliberately does not depend on proving that several sessions belong to the same person.
 
-- **It is not a model-level guardrail.** It inspects prompts entering the agent; it does not evaluate or constrain the model's outputs. Output filtering is a complementary control, not part of this system.
+**Why:** Tying sessions to an actor by IP address, device fingerprint, or a claimed user identity is attractive, but every one of those signals is either caller-controlled or trivially rotated. An attacker distributing an extraction across residential proxies defeats actor linkage without effort, and a detection that keys on a spoofable identity inherits its spoofability. This is the same instinct as "Identity Comes From the Platform, Never the Payload": do not build a control on a signal the attacker owns.
+
+**How:** Instead, Tier 3 evaluates whether the *combined behavior* of a set of sessions forms an attack. Consider a retail assistant where one session binary-searches the stock of five products at one store, a second does the same for five different products, and two more do it at another store. No session is unusual and nothing ties them together, yet collectively they are mapping inventory. Recognizing that relies on shared query structure, collective coverage of a search space, and complementary division of work between sessions, none of which requires knowing who is behind them.
+
+**Status:** The actor-agnostic premise is built in — cross-session correlation keys on behavior, not identity, today. Distributed-enumeration rule packs are on the roadmap.
+
+**Expected outcome:** Distributed extraction and coordinated abuse become detectable even when the attacker rotates every piece of identifying infrastructure, and the detection cannot be defeated by forging the attributes an actor-based approach would rely on.
+
+---
+
+## Design Principle: Contain the Chain, Not Just the Session
+
+In agentic architectures a single request fans out across many agents and tools, each with its own session. Agent Vardøger is designed so that containment can follow that fan-out.
+
+**Why:** A session identified as malicious at one step may already have passed tainted context to the agents downstream of it. Terminating only the session where detection fired leaves the rest of the chain acting on attacker-influenced input. This is the sidecar model applied to a mesh of agents: in container environments, security moved beside each workload and gained visibility across the whole service mesh, and the same visibility makes chain-wide containment possible for agents.
+
+**How:** By tracking which agents communicate with which, over which sessions, through the gateway, MCP, and agent-to-agent protocols, or when user-defined, the system can terminate the downstream sessions a malicious session initiated or fed, carry risk forward to the sessions it touched, and show operators the full blast radius of any detection. Session termination remains the single enforcement lever; the session graph determines how far it reaches. See [ROADMAP.md](ROADMAP.md#4-agent-to-agent-containment).
+
+**Status:** Directional. The single-lever (kill the session) design is what makes chain-wide containment a natural extension; the session graph itself is roadmap.
+
+**Expected outcome:** A compromise detected anywhere in an agent chain can be contained across the chain, and incident responders can see every agent and session reachable from a detection.
+
+---
+
+## Design Boundaries and Direction
+
+Being explicit about what the system is designed to do, what the system does *not* claim to do, and where it is headed, is part of the design.
+
+- **It is not a model-level guardrail.** It does not rewrite or constrain what the model generates; Bedrock Guardrails and similar controls remain complementary. Its focus today is the traffic entering the agent, and response monitoring (evaluating what the agent hands back against the intent of the whole conversation) is the next major step toward outcome-based security. See [ROADMAP.md](ROADMAP.md#3-response-monitoring-and-outcome-based-security).
 - **Detection is heuristic, not complete.** Signatures and scoring catch known and known-shaped attacks. A sufficiently novel attack may pass Tier 1 and be caught only by Tier 2/3, or not at all until a signature is added. This is why the tiers, the outcome ledger, and the contribution loop exist.
 - **Tier 3 kill mode is conservative by design.** It will miss some coordinated attacks in exchange for not amplifying false positives tenant-wide. Operators who want more aggressive cross-session enforcement must opt in explicitly.
-- **The self-hosted ML tier is a capable baseline, not a research-grade model.** Operators are encouraged to bring their own model; guidance is provided for doing so.
+- **The self-hosted ML tier is a capable baseline, not a research-grade model.** Operators are encouraged to bring their own model, with guidance provided; a tuned model and curated behavioral signals are part of the premium and managed roadmap.
 
 ---
 
@@ -289,8 +329,11 @@ Being explicit about what the system does *not* claim to do is part of the desig
 | Safe-intent gates | Low false-positive rate on legitimate traffic |
 | Outcome ledger | Measurable, trendable detection quality, scoped to the operator's own data |
 | Adapter abstraction | New platform integrations without core rewrites |
-| Community + premium split | Sustainable open source with a contribution flywheel |
+| Signatures as a Community Asset, Intelligence as an add-on | Every engine open; curated content funds development; operators can author their own for every tier |
 | Premium via AWS Marketplace (cross-account S3) | Enterprise-trusted billing/entitlement with no secret-sharing or in-app payment |
 | Signature safety screening | One bad signature cannot break detection for everyone |
 | Cost visibility via tagging | Native AWS billing attribution instead of an in-app estimator |
-| Two deployment models | Serve control-focused and convenience-focused buyers from one codebase |
+| Detect the pattern, not the actor | Distributed attacks detectable without relying on spoofable actor identity |
+| Contain the chain | Termination that can follow a compromise across an agent chain |
+| Two deployment models | Serve control-focused and convenience-focused buyers from one
+ codebase |
